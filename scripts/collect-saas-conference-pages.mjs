@@ -1,11 +1,15 @@
 import { readFile, writeFile, mkdir } from "fs/promises";
-import path from "path";
 import { DATA_DIR, dataPath } from "./data-dir.mjs";
 
-const ROOT = process.cwd();
 const CONFIG_PATH = dataPath("saas-conference-source-pages.json");
 const OUT_JSON = dataPath("real-source-mentions.json");
 const OUT_CSV = dataPath("real-source-mentions.csv");
+
+const FETCH_TIMEOUT_MS = Number(process.env.SAAS_EVENT_FETCH_TIMEOUT_MS || 15000);
+const MAX_EVENT_SOURCES = Number(process.env.MAX_EVENT_SOURCES || 8);
+const MAX_EVENT_CANDIDATES_PER_SOURCE = Number(
+  process.env.MAX_EVENT_CANDIDATES_PER_SOURCE || 120
+);
 
 const OBVIOUS_BAD_EXACT = new Set([
   "home",
@@ -40,33 +44,38 @@ const OBVIOUS_BAD_EXACT = new Set([
   "footer logo",
   "json",
   "rsd",
-  "scroll to top",
-  "download on the app store",
-  "download on google play",
-  "feast your mind",
-  "global village",
-  "interact",
-  "dublin tech summit",
-  "copyright and company info",
-  "click to start search"
+  "scroll to top"
 ]);
 
 const OBVIOUS_BAD_CONTAINS = [
   "powered by",
   "all rights reserved",
-  "early-table",
   "cookie policy",
   "feature sessions",
-  "dts partners - currently trusted",
-  "icon:",
-  "currently trusted by_",
-  "sustainability policy"
+  "icon:"
 ];
+
+function parseEnvSources() {
+  const raw = process.env.SAAS_EVENT_SOURCES_JSON || "";
+  if (!raw.trim()) return [];
+
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    console.log(
+      `SAAS_EVENT_SOURCES_JSON parse failed: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`
+    );
+    return [];
+  }
+}
 
 function normalize(value) {
   return String(value || "")
     .replace(/&amp;/g, "&")
-    .replace(/&#x27;/g, "'")
+    .replace(/&#39;/g, "'")
     .replace(/&quot;/g, '"')
     .replace(/<[^>]*>/g, " ")
     .replace(/\s+/g, " ")
@@ -97,7 +106,6 @@ function isObviousJunk(value) {
   if (name.length < 2 || name.length > 120) return true;
   if (OBVIOUS_BAD_EXACT.has(lower)) return true;
   if (OBVIOUS_BAD_CONTAINS.some((phrase) => lower.includes(phrase))) return true;
-
   if (/^https?:\/\//i.test(name)) return true;
   if (/^\d+$/.test(name)) return true;
   if (/[{}[\]|<>]/.test(name)) return true;
@@ -112,7 +120,7 @@ function extractCandidates(html) {
   const candidates = new Set();
 
   const patterns = [
-    /<a\b[^>]*>(.*?)<\/a>/gis,
+    /<a[^>]*>([\s\S]*?)<\/a>/gis,
     /alt=["']([^"']+)["']/gis,
     /title=["']([^"']+)["']/gis,
     /aria-label=["']([^"']+)["']/gis,
@@ -123,7 +131,6 @@ function extractCandidates(html) {
 
   for (const pattern of patterns) {
     let match;
-
     while ((match = pattern.exec(html))) {
       const cleaned = normalize(match[1]);
       if (!isObviousJunk(cleaned)) {
@@ -132,7 +139,7 @@ function extractCandidates(html) {
     }
   }
 
-  return [...candidates];
+  return [...candidates].slice(0, MAX_EVENT_CANDIDATES_PER_SOURCE);
 }
 
 function csvEscape(value) {
@@ -172,30 +179,57 @@ async function readJsonArray(filePath) {
 }
 
 async function fetchHtml(url) {
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; LeadGridSignalBot/1.0)",
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; LeadGridSignalBot/1.0)",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Fetch failed ${response.status}: ${url}`);
     }
-  });
 
-  if (!response.ok) {
-    throw new Error(`Fetch failed ${response.status}: ${url}`);
+    return await response.text();
+  } finally {
+    clearTimeout(timer);
   }
+}
 
-  return response.text();
+async function loadSources() {
+  const fileSources = await readJsonArray(CONFIG_PATH);
+  const envSources = parseEnvSources();
+
+  const sources = fileSources.length > 0 ? fileSources : envSources;
+
+  return sources
+    .filter((source) => source && source.name && source.url)
+    .slice(0, MAX_EVENT_SOURCES);
 }
 
 async function main() {
   await mkdir(DATA_DIR, { recursive: true });
 
-  const sources = await readJsonArray(CONFIG_PATH);
+  const sources = await loadSources();
   const existingRows = await readJsonArray(OUT_JSON);
   const capturedAt = new Date().toISOString();
 
+  if (sources.length === 0) {
+    console.log("No SaaS/event sources configured.");
+    console.log("Set SAAS_EVENT_SOURCES_JSON in Vercel env or upload saas-conference-source-pages.json to Blob.");
+    console.log(`Existing rows: ${existingRows.length}`);
+    await writeFile(OUT_JSON, JSON.stringify(existingRows, null, 2));
+    await writeFile(OUT_CSV, toCsv(existingRows));
+    process.exit(0);
+  }
+
   const managedSourceNames = new Set(sources.map((source) => source.name));
 
-  // Preserve existing non-event rows.
   const keptExistingRows = existingRows.filter((row) => {
     const sourceName = getSourceName(row);
     return !managedSourceNames.has(sourceName);
@@ -210,7 +244,7 @@ async function main() {
       const html = await fetchHtml(source.url);
       const candidates = extractCandidates(html);
 
-      console.log(`  found ${candidates.length} candidates`);
+      console.log(`found ${candidates.length} candidates`);
 
       for (const companyName of candidates) {
         newRows.push({
@@ -225,7 +259,11 @@ async function main() {
         });
       }
     } catch (error) {
-      console.log(`  failed: ${error instanceof Error ? error.message : "unknown error"}`);
+      console.log(
+        `${source.name} failed: ${
+          error instanceof Error ? error.message : "unknown error"
+        }`
+      );
     }
   }
 
@@ -240,6 +278,7 @@ async function main() {
 
     const key = `${companyName.toLowerCase()}::${sourceName.toLowerCase()}`;
     if (seen.has(key)) continue;
+
     seen.add(key);
 
     mergedRows.push({
@@ -259,6 +298,7 @@ async function main() {
   }
 
   console.log("");
+  console.log(`Configured SaaS/event sources: ${sources.length}`);
   console.log(`Existing kept rows: ${keptExistingRows.length}`);
   console.log(`New SaaS/event candidates: ${newRows.length}`);
   console.log(`Merged rows: ${mergedRows.length}`);
