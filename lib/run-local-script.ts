@@ -4,6 +4,12 @@ import { spawn } from "child_process";
 import path from "path";
 import { LEADGRID_DATA_DIR } from "@/lib/data-dir";
 
+// Keep this static import here so Next/Vercel file tracing includes
+// @vercel/blob and its transitive dependencies in serverless functions.
+// The actual Blob read/write still happens inside scripts/blob-*.mjs.
+import { list as __blobTraceList } from "@vercel/blob";
+void __blobTraceList;
+
 export type RunLocalScriptResult = {
   ok: boolean;
   code: number | null;

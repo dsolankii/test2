@@ -1,16 +1,17 @@
 import type { NextConfig } from "next";
 
-const tracedRuntimeFiles = [
-  "./scripts/**/*",
-  "./node_modules/**/*",
-  "./package.json",
-  "./package-lock.json"
-];
-
 const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
-    "/api/**/*": tracedRuntimeFiles,
-    "/api/*": tracedRuntimeFiles
+    "/api/**/*": [
+      "./scripts/**/*",
+      "./package.json",
+      "./package-lock.json"
+    ],
+    "/api/*": [
+      "./scripts/**/*",
+      "./package.json",
+      "./package-lock.json"
+    ]
   }
 };
 
