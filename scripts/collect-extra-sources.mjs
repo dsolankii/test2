@@ -498,7 +498,7 @@ function dedupeRows(rows) {
 }
 
 async function main() {
-  fs.mkdirSync("data", { recursive: true });
+  fs.mkdirSync(DATA_DIR, { recursive: true });
 
   const existingRows = fs.existsSync(INPUT_JSON)
     ? JSON.parse(fs.readFileSync(INPUT_JSON, "utf-8"))

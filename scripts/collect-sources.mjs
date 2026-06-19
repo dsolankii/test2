@@ -627,7 +627,7 @@ function dedupeRows(rows) {
 }
 
 async function main() {
-  fs.mkdirSync("data", { recursive: true });
+  fs.mkdirSync(DATA_DIR, { recursive: true });
 
   const hnRows = await collectHackerNewsWhoIsHiring();
   const remoteOkRows = await collectRemoteOk();
