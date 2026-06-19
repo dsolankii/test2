@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { LEADGRID_DATA_DIR, dataPath } from "@/lib/data-dir";
+import { applyWorkspaceToRequest } from "@/lib/workspace";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,7 +44,8 @@ function runDetachedPipeline() {
   child.unref();
 }
 
-export async function POST() {
+export async function POST(request: Request) {
+  applyWorkspaceToRequest(request);
   try {
     fs.mkdirSync(LEADGRID_DATA_DIR, { recursive: true });
 

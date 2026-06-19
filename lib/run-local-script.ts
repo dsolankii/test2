@@ -2,7 +2,7 @@ import { access } from "fs/promises";
 import { constants } from "fs";
 import { spawn } from "child_process";
 import path from "path";
-import { LEADGRID_DATA_DIR } from "@/lib/data-dir";
+import { getLeadgridDataDir } from "@/lib/data-dir";
 import { pullBlobData, pushBlobData } from "@/lib/blob-store";
 
 export type RunLocalScriptResult = {
@@ -52,7 +52,7 @@ function runNodeScript(
       cwd: process.cwd(),
       env: {
         ...process.env,
-        LEADGRID_DATA_DIR
+        LEADGRID_DATA_DIR: getLeadgridDataDir()
       }
     });
 

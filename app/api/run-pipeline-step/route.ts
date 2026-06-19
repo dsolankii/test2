@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { readFile, writeFile, stat } from "fs/promises";
 import { runLocalScript } from "@/lib/run-local-script";
 import { dataPath } from "@/lib/data-dir";
+import { applyWorkspaceToRequest } from "@/lib/workspace";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,7 +26,7 @@ const stepScripts: Record<StepName, string[]> = {
 };
 
 function getCompanyName(row: Record<string, any>) {
-  return String(row.companyName || row.company || row.name || "").trim();
+  return String(row.rawName || row.companyName || row.company || row.name || "").trim();
 }
 
 async function readRows(fileName: string) {
@@ -213,6 +214,7 @@ function getStepLabel(script: string) {
 }
 
 export async function POST(request: Request) {
+  applyWorkspaceToRequest(request);
   try {
     const body = await request.json().catch(() => ({}));
     const step = body.step as StepName;

@@ -5,10 +5,10 @@ const CONFIG_PATH = dataPath("saas-conference-source-pages.json");
 const OUT_JSON = dataPath("real-source-mentions.json");
 const OUT_CSV = dataPath("real-source-mentions.csv");
 
-const FETCH_TIMEOUT_MS = Number(process.env.SAAS_EVENT_FETCH_TIMEOUT_MS || 15000);
-const MAX_EVENT_SOURCES = Number(process.env.MAX_EVENT_SOURCES || 8);
+const FETCH_TIMEOUT_MS = Number(process.env.SAAS_EVENT_FETCH_TIMEOUT_MS || 25000);
+const MAX_EVENT_SOURCES = Number(process.env.MAX_EVENT_SOURCES || 10);
 const MAX_EVENT_CANDIDATES_PER_SOURCE = Number(
-  process.env.MAX_EVENT_CANDIDATES_PER_SOURCE || 120
+  process.env.MAX_EVENT_CANDIDATES_PER_SOURCE || 250
 );
 
 const OBVIOUS_BAD_EXACT = new Set([
@@ -44,7 +44,9 @@ const OBVIOUS_BAD_EXACT = new Set([
   "footer logo",
   "json",
   "rsd",
-  "scroll to top"
+  "scroll to top",
+  "download on the app store",
+  "download on google play"
 ]);
 
 const OBVIOUS_BAD_CONTAINS = [
@@ -84,7 +86,8 @@ function normalize(value) {
 
 function getCompanyName(row) {
   return normalize(
-    row.companyName ||
+    row.rawName ||
+      row.companyName ||
       row.company ||
       row.name ||
       row.organization ||
@@ -143,23 +146,30 @@ function extractCandidates(html) {
 }
 
 function csvEscape(value) {
-  const text = String(value ?? "");
-  if (/[",\n]/.test(text)) {
-    return `"${text.replace(/"/g, '""')}"`;
-  }
-  return text;
+  if (value === undefined || value === null) return "";
+  const text = Array.isArray(value) ? value.join("; ") : String(value);
+  const cleaned = text.replace(/\r?\n|\r/g, " ").replace(/\s+/g, " ").trim();
+  return `"${cleaned.replace(/"/g, '""')}"`;
 }
 
-function toCsv(rows) {
+function toPipelineCsv(rows) {
   const headers = [
-    "companyName",
-    "sourceName",
-    "source",
+    "id",
+    "rawName",
+    "website",
     "sourceType",
+    "sourceName",
     "sourceUrl",
-    "signal",
-    "mentionTitle",
-    "capturedAt"
+    "description",
+    "homepageText",
+    "careersText",
+    "lastActivityDate",
+    "country",
+    "estimatedSize",
+    "stageHint",
+    "agentConfidence",
+    "expectedCategory",
+    "expectedTrashReason"
   ];
 
   return [
@@ -204,12 +214,64 @@ async function fetchHtml(url) {
 async function loadSources() {
   const fileSources = await readJsonArray(CONFIG_PATH);
   const envSources = parseEnvSources();
-
   const sources = fileSources.length > 0 ? fileSources : envSources;
 
   return sources
     .filter((source) => source && source.name && source.url)
     .slice(0, MAX_EVENT_SOURCES);
+}
+
+function toPipelineRow(companyName, source, capturedAt) {
+  const safeIdCompany = companyName.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  const safeIdSource = source.name.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+
+  return {
+    id: `event_${safeIdSource}_${safeIdCompany}`,
+    rawName: companyName,
+    website: "",
+    sourceType: source.type || "conference",
+    sourceName: source.name,
+    sourceUrl: source.url,
+    description:
+      source.eventDescription ||
+      `${companyName} appeared on ${source.name}. Public event/sponsor/exhibitor presence is treated as GTM visibility and market activity signal.`,
+    homepageText: `${companyName} appeared on ${source.name}. This is a public GTM visibility signal.`,
+    careersText: "",
+    lastActivityDate: capturedAt.slice(0, 10),
+    country: "",
+    estimatedSize: "",
+    stageHint: "conference_gtm_visibility_signal",
+    agentConfidence: 0.55,
+    expectedCategory: "real_source_unclassified",
+    expectedTrashReason: ""
+  };
+}
+
+function dedupeRows(rows) {
+  const seen = new Set();
+  const unique = [];
+
+  for (const row of rows) {
+    const companyName = getCompanyName(row);
+    const sourceName = getSourceName(row);
+    const sourceUrl = normalize(row.sourceUrl || row.website || "");
+
+    if (isObviousJunk(companyName)) continue;
+
+    const key = `${companyName.toLowerCase()}|${sourceName.toLowerCase()}|${sourceUrl.toLowerCase()}`;
+    if (seen.has(key)) continue;
+
+    seen.add(key);
+
+    unique.push({
+      ...row,
+      rawName: row.rawName || companyName,
+      sourceName,
+      source: row.source || sourceName
+    });
+  }
+
+  return unique;
 }
 
 async function main() {
@@ -221,10 +283,10 @@ async function main() {
 
   if (sources.length === 0) {
     console.log("No SaaS/event sources configured.");
-    console.log("Set SAAS_EVENT_SOURCES_JSON in Vercel env or upload saas-conference-source-pages.json to Blob.");
-    console.log(`Existing rows: ${existingRows.length}`);
+    console.log("Preserving existing rows.");
     await writeFile(OUT_JSON, JSON.stringify(existingRows, null, 2));
-    await writeFile(OUT_CSV, toCsv(existingRows));
+    await writeFile(OUT_CSV, toPipelineCsv(existingRows));
+    console.log(`Merged rows: ${existingRows.length}`);
     process.exit(0);
   }
 
@@ -247,16 +309,7 @@ async function main() {
       console.log(`found ${candidates.length} candidates`);
 
       for (const companyName of candidates) {
-        newRows.push({
-          companyName,
-          sourceName: source.name,
-          source: source.name,
-          sourceType: source.type || "event",
-          sourceUrl: source.url,
-          signal: "Public event activity",
-          mentionTitle: `${companyName} appeared on ${source.name}`,
-          capturedAt
-        });
+        newRows.push(toPipelineRow(companyName, source, capturedAt));
       }
     } catch (error) {
       console.log(
@@ -267,29 +320,9 @@ async function main() {
     }
   }
 
-  const seen = new Set();
-  const mergedRows = [];
+  const mergedRows = dedupeRows([...keptExistingRows, ...newRows]);
 
-  for (const row of [...keptExistingRows, ...newRows]) {
-    const companyName = getCompanyName(row);
-    const sourceName = getSourceName(row);
-
-    if (isObviousJunk(companyName)) continue;
-
-    const key = `${companyName.toLowerCase()}::${sourceName.toLowerCase()}`;
-    if (seen.has(key)) continue;
-
-    seen.add(key);
-
-    mergedRows.push({
-      ...row,
-      companyName,
-      sourceName,
-      source: row.source || sourceName
-    });
-  }
-
-  if (existingRows.length >= 100 && mergedRows.length < 100) {
+  if (existingRows.length >= 100 && mergedRows.length < existingRows.length * 0.5) {
     console.error("SaaS extraction safety stop");
     console.error(`Before: ${existingRows.length}`);
     console.error(`After: ${mergedRows.length}`);
@@ -299,12 +332,13 @@ async function main() {
 
   console.log("");
   console.log(`Configured SaaS/event sources: ${sources.length}`);
+  console.log(`Existing rows before events: ${existingRows.length}`);
   console.log(`Existing kept rows: ${keptExistingRows.length}`);
   console.log(`New SaaS/event candidates: ${newRows.length}`);
   console.log(`Merged rows: ${mergedRows.length}`);
 
   await writeFile(OUT_JSON, JSON.stringify(mergedRows, null, 2));
-  await writeFile(OUT_CSV, toCsv(mergedRows));
+  await writeFile(OUT_CSV, toPipelineCsv(mergedRows));
 }
 
 main().catch((error) => {

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import fs from "node:fs";
 import { dataPath } from "@/lib/data-dir";
+import { applyWorkspaceToRequest } from "@/lib/workspace";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -110,7 +111,8 @@ function getStatus() {
   };
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  applyWorkspaceToRequest(request);
   try {
     return NextResponse.json({
       ok: true,

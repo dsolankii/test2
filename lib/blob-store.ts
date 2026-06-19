@@ -1,9 +1,9 @@
 import { access, mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import { get, list, put } from "@vercel/blob";
-import { LEADGRID_DATA_DIR } from "@/lib/data-dir";
+import { getLeadgridDataDir, getLeadgridWorkspaceId } from "@/lib/data-dir";
 
-const PREFIX = process.env.LEADGRID_BLOB_PREFIX || "leadgrid/data";
+const BASE_PREFIX = process.env.LEADGRID_BLOB_PREFIX || "leadgrid/data";
 
 const FILES = [
   "current-live-run.json",
@@ -25,12 +25,16 @@ function blobAccess(): "private" | "public" {
   return process.env.LEADGRID_BLOB_ACCESS === "public" ? "public" : "private";
 }
 
+function blobPrefix() {
+  return `${BASE_PREFIX}/users/${getLeadgridWorkspaceId()}`;
+}
+
 function blobPath(file: string) {
-  return `${PREFIX}/${file}`;
+  return `${blobPrefix()}/${file}`;
 }
 
 function localPath(file: string) {
-  return path.join(LEADGRID_DATA_DIR, file);
+  return path.join(getLeadgridDataDir(), file);
 }
 
 function contentType(file: string) {
@@ -68,11 +72,13 @@ async function readPublicBlob(url: string) {
 }
 
 export async function pullBlobData() {
-  await mkdir(LEADGRID_DATA_DIR, { recursive: true });
+  await mkdir(getLeadgridDataDir(), { recursive: true });
 
   const accessMode = blobAccess();
+  const prefix = `${blobPrefix()}/`;
+
   const { blobs } = await list({
-    prefix: `${PREFIX}/`,
+    prefix,
     limit: 1000
   });
 
@@ -95,11 +101,11 @@ export async function pullBlobData() {
     pulled += 1;
   }
 
-  console.log(`Blob pull complete: ${pulled} files`);
+  console.log(`Blob pull complete for ${getLeadgridWorkspaceId()}: ${pulled} files`);
 }
 
 export async function pushBlobData() {
-  await mkdir(LEADGRID_DATA_DIR, { recursive: true });
+  await mkdir(getLeadgridDataDir(), { recursive: true });
 
   const accessMode = blobAccess();
   let pushed = 0;
@@ -120,5 +126,5 @@ export async function pushBlobData() {
     pushed += 1;
   }
 
-  console.log(`Blob push complete: ${pushed} files`);
+  console.log(`Blob push complete for ${getLeadgridWorkspaceId()}: ${pushed} files`);
 }

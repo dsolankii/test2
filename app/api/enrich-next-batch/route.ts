@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import { LEADGRID_DATA_DIR, dataPath } from "@/lib/data-dir";
+import { applyWorkspaceToRequest } from "@/lib/workspace";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -115,7 +116,8 @@ function revealNextBatch() {
   };
 }
 
-export async function POST() {
+export async function POST(request: Request) {
+  applyWorkspaceToRequest(request);
   let lockHandle: number | null = null;
 
   try {

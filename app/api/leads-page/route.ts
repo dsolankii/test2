@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { readFile, writeFile, mkdir } from "fs/promises";
 import path from "path";
 import { dataPath } from "@/lib/data-dir";
+import { applyWorkspaceToRequest } from "@/lib/workspace";
 
 const STATE_PATH = dataPath("leadgrid-visible-state.json");
 const LEADS_PATH = dataPath("company-dashboard-leads.json");
@@ -32,6 +33,7 @@ async function readState() {
 }
 
 export async function POST(request: Request) {
+  applyWorkspaceToRequest(request);
   await mkdir(path.dirname(STATE_PATH), { recursive: true });
 
   const body = await request.json().catch(() => ({}));

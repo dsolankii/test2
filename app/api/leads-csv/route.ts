@@ -4,6 +4,7 @@ import { runLocalScript } from "@/lib/run-local-script";
 import { NextResponse } from "next/server";
 import { readFile } from "fs/promises";
 import { dataPath } from "@/lib/data-dir";
+import { applyWorkspaceToRequest } from "@/lib/workspace";
 
 const STATE_PATH = dataPath("leadgrid-visible-state.json");
 const LEADS_PATH = dataPath("company-dashboard-leads.json");
@@ -51,7 +52,8 @@ async function readState() {
   }
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  applyWorkspaceToRequest(request);
   if (process.env.VERCEL) await runLocalScript("scripts/blob-pull.mjs", 60 * 1000);
   try {
     const raw = await readFile(LEADS_PATH, "utf8");

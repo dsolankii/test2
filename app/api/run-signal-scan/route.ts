@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { readFile } from "fs/promises";
 import { runLocalScript, scriptExists } from "@/lib/run-local-script";
 import { dataPath } from "@/lib/data-dir";
+import { applyWorkspaceToRequest } from "@/lib/workspace";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,7 +21,8 @@ async function readRows(fileName: string) {
   }
 }
 
-export async function POST() {
+export async function POST(request: Request) {
+  applyWorkspaceToRequest(request);
   try {
     const scripts = [
       "scripts/collect-sources.mjs",
