@@ -3,12 +3,7 @@ import { constants } from "fs";
 import { spawn } from "child_process";
 import path from "path";
 import { LEADGRID_DATA_DIR } from "@/lib/data-dir";
-
-// Keep this static import here so Next/Vercel file tracing includes
-// @vercel/blob and its transitive dependencies in serverless functions.
-// The actual Blob read/write still happens inside scripts/blob-*.mjs.
-import { list as __blobTraceList } from "@vercel/blob";
-void __blobTraceList;
+import { pullBlobData, pushBlobData } from "@/lib/blob-store";
 
 export type RunLocalScriptResult = {
   ok: boolean;
@@ -35,7 +30,7 @@ function assertScriptOk(result: RunLocalScriptResult, scriptPath: string) {
     `Script failed: ${scriptPath}`,
     `Exit code: ${result.code ?? "unknown"}`,
     result.stderr ? `stderr:\n${result.stderr}` : "",
-    result.stdout ? `stdout:\n${result.stdout}` : "",
+    result.stdout ? `stdout:\n${result.stdout}` : ""
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -57,8 +52,8 @@ function runNodeScript(
       cwd: process.cwd(),
       env: {
         ...process.env,
-        LEADGRID_DATA_DIR,
-      },
+        LEADGRID_DATA_DIR
+      }
     });
 
     let stdout = "";
@@ -73,7 +68,7 @@ function runNodeScript(
         ok: false,
         code: null,
         stdout,
-        stderr: `${stderr}\nTimed out after ${timeoutMs}ms`.trim(),
+        stderr: `${stderr}\nTimed out after ${timeoutMs}ms`.trim()
       });
     }, timeoutMs);
 
@@ -93,7 +88,7 @@ function runNodeScript(
         ok: code === 0,
         code,
         stdout,
-        stderr,
+        stderr
       });
     });
 
@@ -105,7 +100,7 @@ function runNodeScript(
         ok: false,
         code: null,
         stdout,
-        stderr: `${stderr}\n${error.message}`.trim(),
+        stderr: `${stderr}\n${error.message}`.trim()
       });
     });
   });
@@ -120,20 +115,39 @@ export async function runLocalScript(
     scriptPath.includes("blob-push") ||
     scriptPath.includes("blob-sync");
 
-  if (!isVercel || isBlobScript) {
+  if (isBlobScript) {
+    if (isVercel) {
+      if (scriptPath.includes("blob-pull")) {
+        await pullBlobData();
+      } else {
+        await pushBlobData();
+      }
+
+      return {
+        ok: true,
+        code: 0,
+        stdout: `${scriptPath} completed through imported Blob SDK`,
+        stderr: ""
+      };
+    }
+
     const result = await runNodeScript(scriptPath, timeoutMs);
     assertScriptOk(result, scriptPath);
     return result;
   }
 
-  const pullResult = await runNodeScript("scripts/blob-pull.mjs", 60 * 1000);
-  assertScriptOk(pullResult, "scripts/blob-pull.mjs");
+  if (!isVercel) {
+    const result = await runNodeScript(scriptPath, timeoutMs);
+    assertScriptOk(result, scriptPath);
+    return result;
+  }
+
+  await pullBlobData();
 
   const result = await runNodeScript(scriptPath, timeoutMs);
   assertScriptOk(result, scriptPath);
 
-  const pushResult = await runNodeScript("scripts/blob-push.mjs", 60 * 1000);
-  assertScriptOk(pushResult, "scripts/blob-push.mjs");
+  await pushBlobData();
 
   return result;
 }
