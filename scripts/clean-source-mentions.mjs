@@ -106,7 +106,7 @@ function isObviousJunk(value) {
   const lower = name.toLowerCase();
 
   if (!name) return true;
-  if (name.length < 2 || name.length > 160) return true;
+  if (name.length < 2 || name.length > 180) return true;
   if (BAD_EXACT.has(lower)) return true;
   if (BAD_CONTAINS.some((phrase) => lower.includes(phrase))) return true;
   if (/^https?:\/\//i.test(name)) return true;
@@ -177,12 +177,24 @@ async function main() {
   const seen = new Set();
   const cleanedRows = [];
 
+  let missingCompanyName = 0;
+  let junk = 0;
+  let duplicates = 0;
+
   for (const row of Array.isArray(rows) ? rows : []) {
     const companyName = getCompanyName(row);
     const sourceName = getSourceName(row);
     const sourceUrl = clean(row.sourceUrl || row.website || "");
 
-    if (isObviousJunk(companyName)) continue;
+    if (!companyName) {
+      missingCompanyName += 1;
+      continue;
+    }
+
+    if (isObviousJunk(companyName)) {
+      junk += 1;
+      continue;
+    }
 
     const key = [
       normalizeKey(companyName),
@@ -190,7 +202,11 @@ async function main() {
       sourceUrl.toLowerCase()
     ].join("|");
 
-    if (seen.has(key)) continue;
+    if (seen.has(key)) {
+      duplicates += 1;
+      continue;
+    }
+
     seen.add(key);
 
     cleanedRows.push({
@@ -206,6 +222,12 @@ async function main() {
     console.error("Cleanup safety stop");
     console.error(`Before: ${rows.length}`);
     console.error(`After: ${cleanedRows.length}`);
+    console.error(`Missing company names: ${missingCompanyName}`);
+    console.error(`Junk removed: ${junk}`);
+    console.error(`Duplicates removed: ${duplicates}`);
+    console.error(`Example first row keys: ${Object.keys(rows[0] || {}).join(", ")}`);
+    console.error(`Example first row rawName: ${rows[0]?.rawName || ""}`);
+    console.error(`Example first row companyName: ${rows[0]?.companyName || ""}`);
     console.error("Refusing to write because cleanup would remove too much.");
     process.exit(1);
   }
@@ -216,7 +238,10 @@ async function main() {
   console.log("Source cleanup complete");
   console.log(`Before: ${rows.length}`);
   console.log(`After: ${cleanedRows.length}`);
-  console.log(`Removed: ${rows.length - cleanedRows.length}`);
+  console.log(`Missing company names: ${missingCompanyName}`);
+  console.log(`Junk removed: ${junk}`);
+  console.log(`Duplicates removed: ${duplicates}`);
+  console.log(`Removed total: ${rows.length - cleanedRows.length}`);
 }
 
 main().catch((error) => {
