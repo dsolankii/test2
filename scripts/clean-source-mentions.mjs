@@ -1,12 +1,11 @@
-import { readFile, writeFile } from "fs/promises";
-import path from "path";
+import { readFile, writeFile, mkdir } from "fs/promises";
 import { DATA_DIR, dataPath } from "./data-dir.mjs";
 
-const ROOT = process.cwd();
 const IN_JSON = dataPath("real-source-mentions.json");
 const OUT_CSV = dataPath("real-source-mentions.csv");
 
 const BAD_EXACT = new Set([
+  "",
   "home",
   "login",
   "register",
@@ -22,9 +21,7 @@ const BAD_EXACT = new Set([
   "download on google play",
   "partners",
   "partnerships",
-  "partnership showroom",
   "terms & conditions",
-  "terms &#038; conditions",
   "terms and conditions",
   "search",
   "menu",
@@ -50,12 +47,7 @@ const BAD_EXACT = new Set([
   "rsd",
   "scroll to top",
   "click to start search",
-  "click to open the search input field",
-  "feast your mind",
-  "global village",
-  "interact",
-  "dublin tech summit",
-  "copyright and company info"
+  "click to open the search input field"
 ]);
 
 const BAD_CONTAINS = [
@@ -63,36 +55,35 @@ const BAD_CONTAINS = [
   "all rights reserved",
   "cookie policy",
   "sustainability policy",
-  "early-table",
-  "feature sessions",
-  "dts partners - currently trusted",
-  "currently trusted by_",
-  "dts-partners-currently-trusted",
-  "icon:",
-  "oembed",
-  "» feed",
   "comments feed",
   "rss2 feed",
-  "dts logo"
+  "oembed",
+  "icon:"
 ];
 
-function clean(value) {
-  return String(value || "")
+function clean(value = "") {
+  return String(value)
     .replace(/&amp;/g, "&")
     .replace(/&#038;/g, "&")
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
     .replace(/&raquo;/g, "»")
+    .replace(/[�]/g, "")
+    .replace(/\r?\n|\r/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 function getCompanyName(row) {
   return clean(
-    row.companyName ||
+    row.rawName ||
+      row.companyName ||
       row.company ||
       row.name ||
       row.organization ||
       row.organisation ||
       row.employer ||
+      row.title ||
       ""
   );
 }
@@ -101,12 +92,21 @@ function getSourceName(row) {
   return clean(row.sourceName || row.source || row.sourceType || "Public source");
 }
 
+function normalizeKey(value = "") {
+  return clean(value)
+    .toLowerCase()
+    .replace(/\b(inc|inc\.|llc|ltd|ltd\.|corp|corp\.|corporation|company|co|co\.|limited|plc|gmbh|sa|ag)\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function isObviousJunk(value) {
   const name = clean(value);
   const lower = name.toLowerCase();
 
   if (!name) return true;
-  if (name.length < 2 || name.length > 140) return true;
+  if (name.length < 2 || name.length > 160) return true;
   if (BAD_EXACT.has(lower)) return true;
   if (BAD_CONTAINS.some((phrase) => lower.includes(phrase))) return true;
   if (/^https?:\/\//i.test(name)) return true;
@@ -120,22 +120,48 @@ function isObviousJunk(value) {
 }
 
 function csvEscape(value) {
-  const text = String(value ?? "");
-  if (/[",\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
-  return text;
+  const text = Array.isArray(value)
+    ? value.join("; ")
+    : typeof value === "object" && value !== null
+      ? JSON.stringify(value)
+      : String(value ?? "");
+
+  const cleaned = text.replace(/\r?\n|\r/g, " ").replace(/\s+/g, " ").trim();
+  return `"${cleaned.replace(/"/g, '""')}"`;
 }
 
 function toCsv(rows) {
-  const headers = [
+  const preferredHeaders = [
+    "id",
+    "rawName",
     "companyName",
-    "sourceName",
-    "source",
+    "website",
     "sourceType",
+    "sourceName",
     "sourceUrl",
+    "description",
+    "homepageText",
+    "careersText",
+    "lastActivityDate",
+    "country",
+    "estimatedSize",
+    "stageHint",
+    "agentConfidence",
+    "expectedCategory",
+    "expectedTrashReason",
     "signal",
     "mentionTitle",
     "capturedAt"
   ];
+
+  const extraHeaders = Array.from(
+    rows.reduce((set, row) => {
+      Object.keys(row || {}).forEach((key) => set.add(key));
+      return set;
+    }, new Set())
+  ).filter((key) => !preferredHeaders.includes(key));
+
+  const headers = [...preferredHeaders, ...extraHeaders];
 
   return [
     headers.join(","),
@@ -143,42 +169,57 @@ function toCsv(rows) {
   ].join("\n");
 }
 
-const raw = await readFile(IN_JSON, "utf8");
-const rows = JSON.parse(raw);
+async function main() {
+  await mkdir(DATA_DIR, { recursive: true });
 
-const seen = new Set();
-const cleanedRows = [];
+  const raw = await readFile(IN_JSON, "utf8");
+  const rows = JSON.parse(raw);
+  const seen = new Set();
+  const cleanedRows = [];
 
-for (const row of rows) {
-  const companyName = getCompanyName(row);
-  const sourceName = getSourceName(row);
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const companyName = getCompanyName(row);
+    const sourceName = getSourceName(row);
+    const sourceUrl = clean(row.sourceUrl || row.website || "");
 
-  if (isObviousJunk(companyName)) continue;
+    if (isObviousJunk(companyName)) continue;
 
-  const key = `${companyName.toLowerCase()}::${sourceName.toLowerCase()}`;
-  if (seen.has(key)) continue;
-  seen.add(key);
+    const key = [
+      normalizeKey(companyName),
+      sourceName.toLowerCase(),
+      sourceUrl.toLowerCase()
+    ].join("|");
 
-  cleanedRows.push({
-    ...row,
-    companyName,
-    sourceName,
-    source: row.source || sourceName
-  });
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    cleanedRows.push({
+      ...row,
+      rawName: row.rawName || companyName,
+      companyName: row.companyName || companyName,
+      sourceName,
+      source: row.source || sourceName
+    });
+  }
+
+  if (rows.length >= 100 && cleanedRows.length < rows.length * 0.2) {
+    console.error("Cleanup safety stop");
+    console.error(`Before: ${rows.length}`);
+    console.error(`After: ${cleanedRows.length}`);
+    console.error("Refusing to write because cleanup would remove too much.");
+    process.exit(1);
+  }
+
+  await writeFile(IN_JSON, JSON.stringify(cleanedRows, null, 2));
+  await writeFile(OUT_CSV, toCsv(cleanedRows));
+
+  console.log("Source cleanup complete");
+  console.log(`Before: ${rows.length}`);
+  console.log(`After: ${cleanedRows.length}`);
+  console.log(`Removed: ${rows.length - cleanedRows.length}`);
 }
 
-if (rows.length >= 100 && cleanedRows.length < rows.length * 0.7) {
-  console.error("Cleanup safety stop");
-  console.error(`Before: ${rows.length}`);
-  console.error(`After: ${cleanedRows.length}`);
-  console.error("Refusing to write because cleanup would remove too much.");
+main().catch((error) => {
+  console.error(error);
   process.exit(1);
-}
-
-await writeFile(IN_JSON, JSON.stringify(cleanedRows, null, 2));
-await writeFile(OUT_CSV, toCsv(cleanedRows));
-
-console.log("Source cleanup complete");
-console.log(`Before: ${rows.length}`);
-console.log(`After: ${cleanedRows.length}`);
-console.log(`Removed: ${rows.length - cleanedRows.length}`);
+});
