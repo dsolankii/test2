@@ -1,0 +1,245 @@
+import fs from "node:fs";
+
+const INPUT_JSON = "data/real-source-mentions.json";
+const ACCEPTED_JSON = "data/real-source-mentions-preclean.json";
+const REJECTED_JSON = "data/real-source-mentions-rejected-preclean.json";
+const ACCEPTED_CSV = "data/real-source-mentions-preclean.csv";
+const REJECTED_CSV = "data/real-source-mentions-rejected-preclean.csv";
+
+function cleanText(value = "") {
+  return String(value)
+    .replace(/[�]/g, "")
+    .replace(/\r?\n|\r/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function joinedText(row) {
+  return [
+    row.rawName,
+    row.sourceType,
+    row.sourceName,
+    row.description,
+    row.homepageText,
+    row.careersText,
+    row.stageHint,
+  ]
+    .filter(Boolean)
+    .map(cleanText)
+    .join(" ")
+    .toLowerCase();
+}
+
+const positiveTerms = [
+  "sales",
+  "account executive",
+  "business development",
+  "sdr",
+  "bdr",
+  "revenue",
+  "revops",
+  "go-to-market",
+  "gtm",
+  "growth",
+  "demand generation",
+  "lead generation",
+  "partnership",
+  "customer success",
+  "marketing",
+  "commercial",
+  "pipeline",
+  "saas",
+  "b2b",
+  "software",
+  "platform",
+  "startup",
+  "enterprise",
+  "crm",
+  "automation",
+  "analytics",
+  "ai",
+  "cloud",
+  "security",
+  "payments",
+  "ecommerce",
+  "retail",
+  "fintech",
+];
+
+const rejectTerms = [
+  "apply to speak",
+  "get 2026 tickets",
+  "get tickets",
+  "book tickets",
+  "agenda & speakers",
+  "agenda",
+  "speakers",
+  "parties & side events",
+  "side events",
+  "venue & location",
+  "venue",
+  "networking",
+  "cmo summit",
+  "cro summit",
+  "cco summit",
+  "meet a vc",
+  "pitch competition",
+  "sponsor us",
+  "become a sponsor",
+  "exhibitor portal",
+  "attendee portal",
+  "admin assistant",
+  "administrative assistant",
+  "virtual assistant",
+  "data entry",
+  "clinical",
+  "nurse",
+  "nursing",
+  "doctor",
+  "physician",
+  "therapist",
+  "pharmacy",
+  "medical assistant",
+  "care coordinator",
+  "recruiter",
+  "recruitment consultant",
+  "staffing agency",
+  "employment agency",
+  "warehouse",
+  "driver",
+  "delivery",
+  "teacher",
+  "tutor",
+  "restaurant",
+  "cashier",
+];
+
+function classifyPreclean(row) {
+  const text = joinedText(row);
+  const name = cleanText(row.rawName);
+
+  if (!name || name.length < 2) {
+    return {
+      keep: false,
+      reason: "missing_or_invalid_company_name",
+    };
+  }
+
+  if (rejectTerms.some((term) => text.includes(term))) {
+    return {
+      keep: false,
+      reason: "obvious_non_gtm_noise",
+    };
+  }
+
+  if (positiveTerms.some((term) => text.includes(term))) {
+    return {
+      keep: true,
+      reason: "has_growth_or_gtm_signal",
+    };
+  }
+
+  if (row.sourceType === "conference") {
+    return {
+      keep: true,
+      reason: "conference_visibility_signal",
+    };
+  }
+
+  return {
+    keep: false,
+    reason: "weak_or_unclear_buying_signal",
+  };
+}
+
+function dedupe(rows) {
+  const seen = new Set();
+  const output = [];
+
+  for (const row of rows) {
+    const key = [
+      cleanText(row.rawName).toLowerCase(),
+      cleanText(row.sourceName).toLowerCase(),
+      cleanText(row.sourceUrl || row.website || "").toLowerCase(),
+    ].join("|");
+
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(row);
+  }
+
+  return output;
+}
+
+function csvEscape(value) {
+  if (value === undefined || value === null) return "";
+  const str = Array.isArray(value) ? value.join("; ") : String(value);
+  return `"${cleanText(str).replace(/"/g, '""')}"`;
+}
+
+function writeCsv(rows, path) {
+  const headers = [
+    "id",
+    "rawName",
+    "website",
+    "sourceType",
+    "sourceName",
+    "sourceUrl",
+    "description",
+    "homepageText",
+    "careersText",
+    "lastActivityDate",
+    "country",
+    "stageHint",
+    "agentConfidence",
+    "precleanDecision",
+    "precleanReason",
+  ];
+
+  const csv = [
+    headers.join(","),
+    ...rows.map((row) => headers.map((header) => csvEscape(row[header])).join(",")),
+  ].join("\n");
+
+  fs.writeFileSync(path, csv);
+}
+
+if (!fs.existsSync(INPUT_JSON)) {
+  console.error(`Missing ${INPUT_JSON}`);
+  process.exit(1);
+}
+
+const rows = JSON.parse(fs.readFileSync(INPUT_JSON, "utf-8"));
+const uniqueRows = dedupe(rows);
+
+const accepted = [];
+const rejected = [];
+
+for (const row of uniqueRows) {
+  const decision = classifyPreclean(row);
+
+  const outputRow = {
+    ...row,
+    precleanDecision: decision.keep ? "accepted" : "rejected",
+    precleanReason: decision.reason,
+  };
+
+  if (decision.keep) accepted.push(outputRow);
+  else rejected.push(outputRow);
+}
+
+fs.writeFileSync(ACCEPTED_JSON, JSON.stringify(accepted, null, 2));
+fs.writeFileSync(REJECTED_JSON, JSON.stringify(rejected, null, 2));
+writeCsv(accepted, ACCEPTED_CSV);
+writeCsv(rejected, REJECTED_CSV);
+
+console.log("Pre-clean complete");
+console.log("------------------");
+console.log(`Raw rows: ${rows.length}`);
+console.log(`Unique rows: ${uniqueRows.length}`);
+console.log(`Accepted for AI/scoring: ${accepted.length}`);
+console.log(`Rejected as obvious noise: ${rejected.length}`);
+console.log(`Wrote ${ACCEPTED_JSON}`);
+console.log(`Wrote ${REJECTED_JSON}`);
+console.log(`Wrote ${ACCEPTED_CSV}`);
+console.log(`Wrote ${REJECTED_CSV}`);

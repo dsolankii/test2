@@ -1,0 +1,107 @@
+import { NextResponse } from "next/server";
+import fs from "node:fs";
+import path from "node:path";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+type AnyRow = Record<string, any>;
+
+const DATA_DIR = path.join(process.cwd(), "data");
+const PRECLEAN_JSON = path.join(DATA_DIR, "real-source-mentions-preclean.json");
+const REJECTED_JSON = path.join(DATA_DIR, "real-source-mentions-rejected-preclean.json");
+const AI_COMPANY_JSON = path.join(DATA_DIR, "ai-enriched-company-leads.json");
+const DASHBOARD_JSON = path.join(DATA_DIR, "company-dashboard-leads.json");
+
+const BATCH_SIZE = 50;
+
+function readJson(filePath: string): AnyRow[] {
+  if (!fs.existsSync(filePath)) return [];
+  return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+}
+
+function cleanText(value = "") {
+  return String(value)
+    .replace(/[�]/g, "")
+    .replace(/\r?\n|\r/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeCompanyName(name = "") {
+  return cleanText(name)
+    .toLowerCase()
+    .replace(/\b(inc|inc\.|llc|ltd|ltd\.|corp|corp\.|corporation|company|co|co\.|limited|plc|gmbh|sa|ag)\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function companyKeyFromName(name = "") {
+  return normalizeCompanyName(name) || cleanText(name).toLowerCase().replace(/[^a-z0-9]+/g, "_");
+}
+
+function uniqueCompanyCount(rows: AnyRow[]) {
+  const keys = new Set<string>();
+
+  for (const row of rows) {
+    const key = row.companyKey || companyKeyFromName(row.rawName || "");
+    if (key) keys.add(key);
+  }
+
+  return keys.size;
+}
+
+function isAiGenerated(row: AnyRow) {
+  return row.aiGenerated === true || String(row.aiGenerated).toLowerCase() === "true";
+}
+
+function getStatus() {
+  const precleanRows = readJson(PRECLEAN_JSON);
+  const rejectedRows = readJson(REJECTED_JSON);
+  const aiRows = readJson(AI_COMPANY_JSON);
+  const dashboardRows = readJson(DASHBOARD_JSON);
+
+  const totalAcceptedCompanies = uniqueCompanyCount(precleanRows);
+  const rejectedCompanies = uniqueCompanyCount(rejectedRows);
+  const aiEnrichedCompanies = uniqueCompanyCount(aiRows);
+  const localFallbackCompanies = Math.max(0, totalAcceptedCompanies - aiEnrichedCompanies);
+
+  const nextBatchStart = aiEnrichedCompanies >= totalAcceptedCompanies ? null : aiEnrichedCompanies + 1;
+  const nextBatchEnd =
+    nextBatchStart === null
+      ? null
+      : Math.min(totalAcceptedCompanies, aiEnrichedCompanies + BATCH_SIZE);
+
+  return {
+    batchSize: BATCH_SIZE,
+    precleanRows: precleanRows.length,
+    totalAcceptedCompanies,
+    rejectedCompanies,
+    aiEnrichedCompanies,
+    localFallbackCompanies,
+    dashboardRows: dashboardRows.length,
+    geminiRowsInDashboard: dashboardRows.filter(isAiGenerated).length,
+    nextBatchStart,
+    nextBatchEnd,
+    isComplete: aiEnrichedCompanies >= totalAcceptedCompanies,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export async function GET() {
+  try {
+    return NextResponse.json({
+      ok: true,
+      status: getStatus(),
+    });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      { status: 500 }
+    );
+  }
+}

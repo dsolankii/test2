@@ -1,0 +1,534 @@
+import fs from "node:fs";
+import dotenv from "dotenv";
+import { GoogleGenAI } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
+import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
+
+dotenv.config({ path: ".env.local", quiet: true });
+
+const INPUT_JSON = "data/real-source-mentions-preclean.json";
+const OUTPUT_JSON = "data/ai-enriched-company-leads.json";
+const OUTPUT_CSV = "data/ai-enriched-company-leads.csv";
+
+const BATCH_SIZE = 50;
+const MAX_COMBINED_TEXT_CHARS = 1600;
+
+const aiProvider = process.env.AI_PROVIDER || "gemini";
+const aiApiKey = process.env.AI_API_KEY;
+const aiModel = process.env.AI_MODEL || "gemini-2.5-flash-lite";
+
+if (aiProvider !== "gemini") {
+  console.error(`Unsupported AI_PROVIDER: ${aiProvider}`);
+  process.exit(1);
+}
+
+if (!aiApiKey) {
+  console.error("Missing AI_API_KEY in .env.local");
+  process.exit(1);
+}
+
+if (!fs.existsSync(INPUT_JSON)) {
+  console.error(`Missing ${INPUT_JSON}`);
+  console.error("Run: node scripts/preclean-real-sources.mjs");
+  process.exit(1);
+}
+
+
+const companyResultSchema = z.object({
+  companyKey: z.string(),
+  companyName: z.string(),
+  cleanCompanyName: z.string(),
+  companyType: z.enum([
+    "b2b_saas",
+    "b2b_software",
+    "ecommerce",
+    "fintech",
+    "healthcare",
+    "agency",
+    "recruiting_staffing",
+    "consumer",
+    "enterprise",
+    "unknown",
+  ]),
+  isPotentialCustomer: z.boolean(),
+  isBadLead: z.boolean(),
+  badLeadReason: z.string(),
+  icpFit: z.enum(["high", "medium", "low"]),
+  buyingStage: z.enum(["high_intent", "medium_intent", "low_intent", "not_relevant"]),
+  signals: z.array(z.string()),
+  intentScore: z.number(),
+  scoreBreakdown: z.object({
+    gtmHiring: z.number(),
+    growthSignal: z.number(),
+    icpFit: z.number(),
+    sourceStrength: z.number(),
+    urgency: z.number(),
+    negativePenalty: z.number(),
+  }),
+  scoreReasoning: z.string(),
+  whyNow: z.string(),
+  recommendedBuyer: z.string(),
+  outreachAngle: z.string(),
+});
+
+const companyResultsSchema = z.array(companyResultSchema);
+const companyResultsJsonSchema = zodToJsonSchema(companyResultsSchema);
+
+const ai = new GoogleGenAI({ apiKey: aiApiKey });
+
+function cleanText(value = "") {
+  return String(value)
+    .replace(/[�]/g, "")
+    .replace(/\r?\n|\r/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeCompanyName(name = "") {
+  return cleanText(name)
+    .toLowerCase()
+    .replace(/\b(inc|inc\.|llc|ltd|ltd\.|corp|corp\.|corporation|company|co|co\.|limited|plc|gmbh|sa|ag)\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function companyKeyFromName(name = "") {
+  const normalized = normalizeCompanyName(name);
+  return normalized || cleanText(name).toLowerCase().replace(/[^a-z0-9]+/g, "_");
+}
+
+function unique(values) {
+  return [...new Set(values.filter(Boolean).map(cleanText).filter(Boolean))];
+}
+
+function compact(value, max = MAX_COMBINED_TEXT_CHARS) {
+  return cleanText(value).slice(0, max);
+}
+
+function sourcePriority(company) {
+  const text = [
+    company.companyName,
+    company.sourceNames.join(" "),
+    company.sourceTypes.join(" "),
+    company.combinedText,
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  let score = 0;
+
+  if (text.includes("account executive")) score += 45;
+  if (text.includes("business development")) score += 45;
+  if (text.includes("sdr") || text.includes("bdr")) score += 45;
+  if (text.includes("sales")) score += 35;
+  if (text.includes("revenue")) score += 32;
+  if (text.includes("revops")) score += 32;
+  if (text.includes("go-to-market") || text.includes("gtm")) score += 30;
+  if (text.includes("growth")) score += 25;
+  if (text.includes("demand generation")) score += 25;
+  if (text.includes("lead generation")) score += 25;
+  if (text.includes("marketing")) score += 18;
+  if (text.includes("partnership")) score += 18;
+  if (text.includes("customer success")) score += 16;
+  if (text.includes("saas")) score += 14;
+  if (text.includes("b2b")) score += 14;
+  if (text.includes("software")) score += 12;
+  if (text.includes("platform")) score += 12;
+  if (company.sourceTypes.includes("conference")) score += 10;
+  if (company.sourceNames.some((name) => name.includes("Adzuna"))) score += 8;
+  if (company.sourceNames.some((name) => name.includes("Jobicy"))) score += 8;
+
+  return score;
+}
+
+function groupRowsByCompany(rows) {
+  const map = new Map();
+
+  for (const row of rows) {
+    const key = companyKeyFromName(row.rawName);
+    if (!key) continue;
+
+    if (!map.has(key)) {
+      map.set(key, {
+        companyKey: key,
+        companyName: cleanText(row.rawName),
+        rows: [],
+        websites: [],
+        sourceNames: [],
+        sourceTypes: [],
+        sourceUrls: [],
+        countries: [],
+        latestActivityDate: "",
+        combinedText: "",
+      });
+    }
+
+    const company = map.get(key);
+    company.rows.push(row);
+    company.websites.push(row.website || "");
+    company.sourceNames.push(row.sourceName || "");
+    company.sourceTypes.push(row.sourceType || "");
+    company.sourceUrls.push(row.sourceUrl || "");
+    company.countries.push(row.country || "");
+
+    const date = cleanText(row.lastActivityDate || "");
+    if (date && date > company.latestActivityDate) {
+      company.latestActivityDate = date;
+    }
+  }
+
+  const companies = [...map.values()].map((company) => {
+    const combinedText = company.rows
+      .map((row) =>
+        [
+          row.description,
+          row.homepageText,
+          row.careersText,
+          row.stageHint,
+          row.precleanReason,
+        ]
+          .filter(Boolean)
+          .map(cleanText)
+          .join(" ")
+      )
+      .join(" | ");
+
+    return {
+      ...company,
+      websites: unique(company.websites),
+      sourceNames: unique(company.sourceNames),
+      sourceTypes: unique(company.sourceTypes),
+      sourceUrls: unique(company.sourceUrls).slice(0, 8),
+      countries: unique(company.countries),
+      mentionCount: company.rows.length,
+      combinedText: compact(combinedText),
+    };
+  });
+
+  return companies;
+}
+
+function safeJsonParse(text) {
+  const raw = String(text || "").trim();
+
+  fs.writeFileSync("data/ai-company-batch-last-raw-response.txt", raw);
+
+  const candidates = [raw];
+
+  const arrayMatch = raw.match(/\[[\s\S]*\]/);
+  if (arrayMatch) {
+    candidates.push(arrayMatch[0]);
+  }
+
+  for (const candidate of candidates) {
+    const cleaned = candidate
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/```$/i, "")
+      .replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'")
+      .trim();
+
+    try {
+      return JSON.parse(cleaned);
+    } catch {
+      // Try repair.
+    }
+
+    try {
+      return JSON.parse(jsonrepair(cleaned));
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  throw new Error(
+    "AI returned malformed JSON. Saved raw output to data/ai-company-batch-last-raw-response.txt"
+  );
+}
+
+function csvEscape(value) {
+  if (value === undefined || value === null) return "";
+  const str = Array.isArray(value) ? value.join("; ") : typeof value === "object" ? JSON.stringify(value) : String(value);
+  return `"${cleanText(str).replace(/"/g, '""')}"`;
+}
+
+function writeCsv(rows, path) {
+  const headers = [
+    "companyKey",
+    "rawName",
+    "website",
+    "sourceType",
+    "sourceName",
+    "sourceUrl",
+    "description",
+    "homepageText",
+    "lastActivityDate",
+    "country",
+    "mentionCount",
+    "aiGenerated",
+    "aiProvider",
+    "aiModel",
+    "aiCompanyType",
+    "aiIsPotentialCustomer",
+    "aiIsBadLead",
+    "aiBadLeadReason",
+    "aiIcpFit",
+    "aiBuyingStage",
+    "aiSignals",
+    "aiIntentScore",
+    "aiScoreBreakdown",
+    "aiScoreReasoning",
+    "aiWhyNow",
+    "aiRecommendedBuyer",
+    "aiOutreachAngle",
+  ];
+
+  const csv = [
+    headers.join(","),
+    ...rows.map((row) => headers.map((header) => csvEscape(row[header])).join(",")),
+  ].join("\n");
+
+  fs.writeFileSync(path, csv);
+}
+
+function buildPrompt(companies) {
+  const input = companies.map((company) => ({
+    companyKey: company.companyKey,
+    companyName: company.companyName,
+    websites: company.websites,
+    sourceNames: company.sourceNames,
+    sourceTypes: company.sourceTypes,
+    sourceUrls: company.sourceUrls,
+    mentionCount: company.mentionCount,
+    latestActivityDate: company.latestActivityDate,
+    text: company.combinedText,
+  }));
+
+  return `
+You are an AI sales intelligence analyst for an outbound sales support and appointment-setting company.
+
+Task:
+Clean, dedupe mentally, qualify, and score these ${input.length} UNIQUE companies.
+Return exactly one result per companyKey.
+
+Input companies:
+${JSON.stringify(input, null, 2)}
+
+Return ONLY valid JSON array. No markdown. No comments.
+Every property name must be double quoted.
+Every string value must be double quoted.
+Do not include trailing commas.
+Do not include JavaScript-style comments.
+Do not include undefined, NaN, Infinity, or single-quoted strings.
+If unsure, use an empty string, empty array, false, or 0.
+
+Each object must have this exact shape:
+[
+  {
+    "companyKey": "must exactly match input companyKey",
+    "companyName": "original company name",
+    "cleanCompanyName": "clean company name",
+    "companyType": "b2b_saas | b2b_software | ecommerce | fintech | healthcare | agency | recruiting_staffing | consumer | enterprise | unknown",
+    "isPotentialCustomer": true,
+    "isBadLead": false,
+    "badLeadReason": "",
+    "icpFit": "high | medium | low",
+    "buyingStage": "high_intent | medium_intent | low_intent | not_relevant",
+    "signals": ["short signal label"],
+    "intentScore": 0,
+    "scoreBreakdown": {
+      "gtmHiring": 0,
+      "growthSignal": 0,
+      "icpFit": 0,
+      "sourceStrength": 0,
+      "urgency": 0,
+      "negativePenalty": 0
+    },
+    "scoreReasoning": "short explanation",
+    "whyNow": "why now is a good time to contact them",
+    "recommendedBuyer": "best buyer roles",
+    "outreachAngle": "personalized outbound angle"
+  }
+]
+
+Weighted scoring method:
+- gtmHiring: 0-35 points
+  Strong: SDR, BDR, Account Executive, Sales, Business Development, Revenue, RevOps, GTM, Partnerships.
+- growthSignal: 0-20 points
+  Growth, marketing, demand generation, lead generation, customer success, expansion language.
+- icpFit: 0-20 points
+  High if B2B SaaS/software/platform/enterprise/fintech/ecommerce tech. Lower for consumer/local/unclear.
+- sourceStrength: 0-15 points
+  Job API with GTM hiring is high. Multiple mentions is stronger. Conference-only is medium.
+- urgency: 0-10 points
+  Recent hiring, multiple signals, or clear scaling motion.
+- negativePenalty: 0 to -50 points
+  Penalize recruiting/staffing agencies, admin/data-entry/clinical-only roles, unclear companies, service providers, or irrelevant local businesses.
+
+Final score = gtmHiring + growthSignal + icpFit + sourceStrength + urgency + negativePenalty.
+Clamp final score between 0 and 100.
+
+Scoring bands:
+- 85-100: high_intent
+- 65-84: medium_intent
+- 40-64: low_intent
+- 0-39: not_relevant or weak
+
+Important rules:
+- Recruiting/staffing agencies are bad leads because they sell services, they are not buyers.
+- Admin, clinical, medical, data-entry, and generic assistant roles are low intent unless there is separate GTM/revenue evidence.
+- Healthcare can be a potential customer only when there is sales/growth/marketing/revenue/partnership/commercial expansion signal.
+- Conference presence alone should not be 90+. It is usually 55-75 unless combined with hiring/growth signals.
+- Be strict. Do not over-score weak leads.
+`;
+}
+
+function normalizeAiResult(company, aiResult) {
+  const score = Number(aiResult.intentScore || 0);
+  const sourceName = company.sourceNames.join("; ");
+  const sourceType = company.sourceTypes.join("; ");
+  const sourceUrl = company.sourceUrls.join("; ");
+
+  return {
+    companyKey: company.companyKey,
+    id: `company_${company.companyKey.replace(/[^a-z0-9]+/g, "_")}`,
+    rawName: cleanText(aiResult.cleanCompanyName || aiResult.companyName || company.companyName),
+    website: company.websites[0] || "",
+    sourceType,
+    sourceName,
+    sourceUrl,
+    description: cleanText(aiResult.scoreReasoning || ""),
+    homepageText: cleanText(
+      [
+        `AI why now: ${aiResult.whyNow || ""}`,
+        `AI outreach angle: ${aiResult.outreachAngle || ""}`,
+        `AI signals: ${Array.isArray(aiResult.signals) ? aiResult.signals.join(", ") : ""}`,
+        `Merged from ${company.mentionCount} source mention(s).`,
+        company.combinedText,
+      ].join(" ")
+    ),
+    careersText: "",
+    lastActivityDate: company.latestActivityDate || "",
+    country: company.countries.join("; "),
+    mentionCount: company.mentionCount,
+    stageHint: "company_level_ai_enriched",
+    agentConfidence: Number.isFinite(score) ? score / 100 : 0,
+    expectedCategory:
+      score >= 85 ? "high_intent" : score >= 65 ? "medium_intent" : score >= 40 ? "low_intent" : "trash",
+    expectedTrashReason: score < 40 ? aiResult.badLeadReason || "Low AI score." : "",
+    aiGenerated: true,
+    aiProvider,
+    aiModel,
+    aiCompanyType: aiResult.companyType || "unknown",
+    aiIsPotentialCustomer: Boolean(aiResult.isPotentialCustomer),
+    aiIsBadLead: Boolean(aiResult.isBadLead),
+    aiBadLeadReason: aiResult.badLeadReason || "",
+    aiIcpFit: aiResult.icpFit || "unknown",
+    aiBuyingStage: aiResult.buyingStage || "unknown",
+    aiSignals: Array.isArray(aiResult.signals) ? aiResult.signals : [],
+    aiIntentScore: Number.isFinite(score) ? score : 0,
+    aiScoreBreakdown: aiResult.scoreBreakdown || {},
+    aiScoreReasoning: aiResult.scoreReasoning || "",
+    aiWhyNow: aiResult.whyNow || "",
+    aiRecommendedBuyer: aiResult.recommendedBuyer || "",
+    aiOutreachAngle: aiResult.outreachAngle || "",
+  };
+}
+
+async function main() {
+  const rows = JSON.parse(fs.readFileSync(INPUT_JSON, "utf-8"));
+  const companies = groupRowsByCompany(rows);
+
+  const existingRows = fs.existsSync(OUTPUT_JSON)
+    ? JSON.parse(fs.readFileSync(OUTPUT_JSON, "utf-8"))
+    : [];
+
+  const existingCompanyKeys = new Set(existingRows.map((row) => row.companyKey));
+
+  const remainingCompanies = companies
+    .filter((company) => !existingCompanyKeys.has(company.companyKey))
+    .sort((a, b) => sourcePriority(b) - sourcePriority(a));
+
+  const batch = remainingCompanies.slice(0, BATCH_SIZE);
+
+  console.log("Company-level batch AI enrichment");
+  console.log("---------------------------------");
+  console.log(`Provider: ${aiProvider}`);
+  console.log(`Model: ${aiModel}`);
+  console.log(`Pre-clean rows: ${rows.length}`);
+  console.log(`Unique companies: ${companies.length}`);
+  console.log(`Already AI-enriched companies: ${existingRows.length}`);
+  console.log(`Remaining companies: ${remainingCompanies.length}`);
+  console.log(`Batch size this run: ${batch.length}`);
+  console.log("");
+
+  if (batch.length === 0) {
+    console.log("Nothing left to enrich.");
+    return;
+  }
+
+  const response = await ai.models.generateContent({
+    model: aiModel,
+    contents: buildPrompt(batch),
+    config: {
+      responseFormat: {
+        text: {
+          mimeType: "application/json",
+          schema: companyResultsJsonSchema,
+        },
+      },
+      temperature: 0.1,
+    },
+  });
+
+  const parsed = safeJsonParse(response.text || "[]");
+  const resultArray = companyResultsSchema.parse(
+    Array.isArray(parsed) ? parsed : parsed.results || parsed.companies || []
+  );
+
+  const resultByKey = new Map();
+  for (const item of resultArray) {
+    if (item?.companyKey) resultByKey.set(String(item.companyKey), item);
+  }
+
+  const newRows = [];
+
+  for (const company of batch) {
+    const aiResult = resultByKey.get(company.companyKey);
+
+    if (!aiResult) {
+      console.log(`Missing AI result for: ${company.companyName}`);
+      continue;
+    }
+
+    const enriched = normalizeAiResult(company, aiResult);
+    newRows.push(enriched);
+
+    console.log(
+      `${enriched.rawName} → ${enriched.aiIntentScore} | ${enriched.aiBuyingStage} | ${enriched.aiIcpFit} | mentions: ${enriched.mentionCount}`
+    );
+  }
+
+  const finalRows = [...existingRows, ...newRows].sort(
+    (a, b) => Number(b.aiIntentScore || 0) - Number(a.aiIntentScore || 0)
+  );
+
+  fs.writeFileSync(OUTPUT_JSON, JSON.stringify(finalRows, null, 2));
+  writeCsv(finalRows, OUTPUT_CSV);
+
+  console.log("");
+  console.log("Company-level AI enrichment complete");
+  console.log("------------------------------------");
+  console.log(`New companies enriched: ${newRows.length}`);
+  console.log(`Total AI-enriched companies saved: ${finalRows.length}`);
+  console.log(`Wrote ${OUTPUT_JSON}`);
+  console.log(`Wrote ${OUTPUT_CSV}`);
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

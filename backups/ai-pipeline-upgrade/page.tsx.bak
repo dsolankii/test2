@@ -1,0 +1,828 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import Papa from "papaparse";
+import rawData from "@/data/raw-company-mentions.json";
+
+type Tab = "overview" | "sources" | "upload" | "leads" | "trash";
+
+type EnrichmentStatus = {
+  batchSize: number;
+  precleanRows: number;
+  totalAcceptedCompanies: number;
+  rejectedCompanies: number;
+  aiEnrichedCompanies: number;
+  localFallbackCompanies: number;
+  dashboardRows: number;
+  geminiRowsInDashboard: number;
+  nextBatchStart: number | null;
+  nextBatchEnd: number | null;
+  isComplete: boolean;
+  updatedAt: string;
+};
+
+type LeadRow = {
+  id?: string;
+  companyKey?: string;
+  rawName?: string;
+  website?: string;
+  sourceType?: string;
+  sourceName?: string;
+  sourceUrl?: string;
+  description?: string;
+  homepageText?: string;
+  careersText?: string;
+  lastActivityDate?: string;
+  country?: string;
+  mentionCount?: number | string;
+  stageHint?: string;
+  agentConfidence?: number | string;
+  expectedCategory?: string;
+  expectedTrashReason?: string;
+
+  precleanDecision?: string;
+  precleanReason?: string;
+
+  aiGenerated?: boolean | string;
+  aiProvider?: string;
+  aiModel?: string;
+  aiCompanyType?: string;
+  aiIsPotentialCustomer?: boolean | string;
+  aiIsBadLead?: boolean | string;
+  aiBadLeadReason?: string;
+  aiIcpFit?: string;
+  aiBuyingStage?: string;
+  aiSignals?: string[] | string;
+  aiIntentScore?: number | string;
+  aiScoreBreakdown?: Record<string, number> | string;
+  aiScoreReasoning?: string;
+  aiWhyNow?: string;
+  aiRecommendedBuyer?: string;
+  aiOutreachAngle?: string;
+};
+
+function asNumber(value: unknown, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function asBoolean(value: unknown) {
+  if (value === true) return true;
+  if (value === false) return false;
+  const text = String(value).toLowerCase();
+  return text === "true" || text === "yes";
+}
+
+function cleanText(value: unknown) {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getScore(row: LeadRow) {
+  return asNumber(row.aiIntentScore, Math.round(asNumber(row.agentConfidence) * 100));
+}
+
+function getSignals(row: LeadRow) {
+  if (Array.isArray(row.aiSignals)) return row.aiSignals;
+  if (typeof row.aiSignals === "string" && row.aiSignals.trim()) {
+    return row.aiSignals
+      .split(";")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function getBreakdown(row: LeadRow) {
+  if (!row.aiScoreBreakdown) return null;
+
+  if (typeof row.aiScoreBreakdown === "object") {
+    return row.aiScoreBreakdown;
+  }
+
+  try {
+    const parsed = JSON.parse(row.aiScoreBreakdown);
+    if (parsed && typeof parsed === "object") return parsed as Record<string, number>;
+  } catch {}
+
+  return null;
+}
+
+function getCategory(row: LeadRow) {
+  if (row.expectedCategory) return row.expectedCategory;
+
+  const score = getScore(row);
+
+  if (asBoolean(row.aiIsBadLead)) return "trash";
+  if (score >= 85) return "high_intent";
+  if (score >= 65) return "medium_intent";
+  if (score >= 40) return "low_intent";
+  return "trash";
+}
+
+function isTrash(row: LeadRow) {
+  return getCategory(row) === "trash" || asBoolean(row.aiIsBadLead);
+}
+
+function providerLabel(row: LeadRow) {
+  if (asBoolean(row.aiGenerated)) return "Gemini AI";
+  if (row.aiProvider === "local-weighted-fallback") return "Local weighted fallback";
+  if (row.aiProvider === "local-rules-fallback") return "Local fallback";
+  if (row.aiProvider === "preclean-rules") return "Pre-clean rejected";
+  return row.aiProvider || "Rule scored";
+}
+
+function scoreColor(score: number) {
+  if (score >= 85) return "bg-emerald-500 text-white";
+  if (score >= 65) return "bg-blue-500 text-white";
+  if (score >= 40) return "bg-amber-500 text-white";
+  return "bg-slate-400 text-white";
+}
+
+function badgeColor(value: string) {
+  const v = value.toLowerCase();
+
+  if (v.includes("gemini")) return "bg-violet-100 text-violet-800 border-violet-200";
+  if (v.includes("local")) return "bg-sky-100 text-sky-800 border-sky-200";
+  if (v.includes("high")) return "bg-emerald-100 text-emerald-800 border-emerald-200";
+  if (v.includes("medium")) return "bg-blue-100 text-blue-800 border-blue-200";
+  if (v.includes("low")) return "bg-amber-100 text-amber-800 border-amber-200";
+  if (v.includes("reject") || v.includes("trash")) return "bg-rose-100 text-rose-800 border-rose-200";
+
+  return "bg-slate-100 text-slate-700 border-slate-200";
+}
+
+function countBy(rows: LeadRow[], keyGetter: (row: LeadRow) => string) {
+  return rows.reduce<Record<string, number>>((acc, row) => {
+    const key = keyGetter(row) || "Unknown";
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+}
+
+export default function Home() {
+  const [activeTab, setActiveTab] = useState<Tab>("overview");
+  const [darkMode, setDarkMode] = useState(false);
+  const [rows, setRows] = useState<LeadRow[]>(rawData as LeadRow[]);
+  const [datasetName, setDatasetName] = useState("Company-level hybrid dataset");
+  const [search, setSearch] = useState("");
+  const [onlyHighIntent, setOnlyHighIntent] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+  const [page, setPage] = useState(1);
+
+  const [status, setStatus] = useState<EnrichmentStatus | null>(null);
+  const [statusError, setStatusError] = useState("");
+  const [isEnriching, setIsEnriching] = useState(false);
+  const [enrichMessage, setEnrichMessage] = useState("");
+
+  async function fetchStatus() {
+    try {
+      setStatusError("");
+      const response = await fetch("/api/enrichment-status", { cache: "no-store" });
+      const data = await response.json();
+
+      if (!data.ok) {
+        throw new Error(data.error || "Failed to load enrichment status");
+      }
+
+      setStatus(data.status);
+    } catch (error) {
+      setStatusError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function enrichNextBatch() {
+    try {
+      setIsEnriching(true);
+      setEnrichMessage("");
+
+      const response = await fetch("/api/enrich-next-batch", {
+        method: "POST",
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || "Enrichment failed");
+      }
+
+      setEnrichMessage(
+        `Done: enriched ${data.newCompaniesEnriched} companies from batch ${data.batchStart}-${data.batchEnd}. Reloading dashboard...`
+      );
+
+      await fetchStatus();
+
+      setTimeout(() => {
+        window.location.reload();
+      }, 1200);
+    } catch (error) {
+      setEnrichMessage("");
+      setStatusError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsEnriching(false);
+    }
+  }
+
+  useEffect(() => {
+    fetchStatus();
+  }, []);
+
+  const sortedRows = useMemo(() => {
+    return [...rows].sort((a, b) => getScore(b) - getScore(a));
+  }, [rows]);
+
+  const leadRows = useMemo(() => sortedRows.filter((row) => !isTrash(row)), [sortedRows]);
+  const trashRows = useMemo(() => sortedRows.filter((row) => isTrash(row)), [sortedRows]);
+
+  const filteredLeads = useMemo(() => {
+    const q = search.toLowerCase().trim();
+
+    return leadRows.filter((row) => {
+      const score = getScore(row);
+      const text = [
+        row.rawName,
+        row.sourceName,
+        row.sourceType,
+        row.aiCompanyType,
+        row.aiScoreReasoning,
+        row.aiWhyNow,
+        row.aiOutreachAngle,
+        getSignals(row).join(" "),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      if (onlyHighIntent && score < 85) return false;
+      if (q && !text.includes(q)) return false;
+
+      return true;
+    });
+  }, [leadRows, search, onlyHighIntent]);
+
+  const leadsPerPage = 10;
+  const totalPages = Math.max(1, Math.ceil(filteredLeads.length / leadsPerPage));
+  const safePage = Math.min(page, totalPages);
+  const visibleLeads = filteredLeads.slice((safePage - 1) * leadsPerPage, safePage * leadsPerPage);
+
+  const metrics = useMemo(() => {
+    return {
+      total: rows.length,
+      leads: leadRows.length,
+      trash: trashRows.length,
+      gemini: rows.filter((row) => asBoolean(row.aiGenerated)).length,
+      localFallback: rows.filter((row) => row.aiProvider === "local-weighted-fallback" || row.aiProvider === "local-rules-fallback").length,
+      highIntent: leadRows.filter((row) => getScore(row) >= 85).length,
+      mediumIntent: leadRows.filter((row) => getScore(row) >= 65 && getScore(row) < 85).length,
+      lowIntent: leadRows.filter((row) => getScore(row) < 65).length,
+    };
+  }, [rows, leadRows, trashRows]);
+
+  const sourceCounts = useMemo(() => countBy(rows, (row) => row.sourceName || "Unknown"), [rows]);
+  const sourceTypeCounts = useMemo(() => countBy(rows, (row) => row.sourceType || "Unknown"), [rows]);
+  const providerCounts = useMemo(() => countBy(rows, providerLabel), [rows]);
+
+  function handleUpload(file: File) {
+    setUploadError("");
+
+    Papa.parse<LeadRow>(file, {
+      header: true,
+      skipEmptyLines: true,
+      dynamicTyping: true,
+      complete: (result) => {
+        if (result.errors.length > 0) {
+          setUploadError(result.errors[0]?.message || "CSV parse error");
+          return;
+        }
+
+        setRows(result.data.filter((row) => row.rawName || row.sourceName));
+        setDatasetName(file.name);
+        setPage(1);
+        setActiveTab("overview");
+      },
+      error: (error) => setUploadError(error.message),
+    });
+  }
+
+  const shellClass = darkMode
+    ? "min-h-screen bg-slate-950 text-slate-100"
+    : "min-h-screen bg-slate-50 text-slate-950";
+
+  const cardClass = darkMode
+    ? "rounded-3xl border border-slate-800 bg-slate-900 shadow-sm"
+    : "rounded-3xl border border-slate-200 bg-white shadow-sm";
+
+  const mutedText = darkMode ? "text-slate-400" : "text-slate-500";
+
+  const tabs: { id: Tab; label: string }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "sources", label: "Sources" },
+    { id: "upload", label: "Upload CSV" },
+    { id: "leads", label: "Ranked Leads" },
+    { id: "trash", label: "Trash Removed" },
+  ];
+
+  return (
+    <main className={shellClass}>
+      <div className="mx-auto max-w-7xl px-5 py-8">
+        <header className="mb-8 flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
+          <div>
+            <p className={`mb-2 text-sm font-semibold uppercase tracking-[0.2em] ${mutedText}`}>
+              AI Lead Signal Source Agent
+            </p>
+            <h1 className="text-4xl font-black tracking-tight md:text-6xl">
+              Buying Signal Monitor
+            </h1>
+            <p className={`mt-4 max-w-3xl text-base leading-7 ${mutedText}`}>
+              Source agents collect noisy company signals. Rules pre-clean and merge duplicates.
+              Gemini enriches the next 50 unique companies per batch, while local weighted scoring
+              keeps the full dashboard usable.
+            </p>
+          </div>
+
+          <button
+            onClick={() => setDarkMode((value) => !value)}
+            className={`rounded-full border px-5 py-3 text-sm font-bold ${
+              darkMode
+                ? "border-slate-700 bg-slate-900 text-slate-100"
+                : "border-slate-200 bg-white text-slate-900"
+            }`}
+          >
+            {darkMode ? "Light mode" : "Dark mode"}
+          </button>
+        </header>
+
+        <section className={`${cardClass} mb-6 p-4`}>
+          <div className="flex flex-wrap gap-2">
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`rounded-full px-4 py-2 text-sm font-bold transition ${
+                  activeTab === tab.id
+                    ? "bg-slate-950 text-white"
+                    : darkMode
+                      ? "bg-slate-800 text-slate-300"
+                      : "bg-slate-100 text-slate-700"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+        </section>
+
+        {activeTab === "overview" && (
+          <section className="space-y-6">
+            <EnrichmentPanel
+              status={status}
+              error={statusError}
+              message={enrichMessage}
+              isEnriching={isEnriching}
+              onRefresh={fetchStatus}
+              onEnrich={enrichNextBatch}
+              darkMode={darkMode}
+            />
+
+            <div className="grid gap-4 md:grid-cols-4">
+              <MetricCard title="Dashboard companies" value={metrics.total} note={datasetName} darkMode={darkMode} />
+              <MetricCard title="Ranked leads" value={metrics.leads} note="Accepted companies" darkMode={darkMode} />
+              <MetricCard title="Gemini enriched" value={status?.aiEnrichedCompanies ?? metrics.gemini} note="Company-level AI rows" darkMode={darkMode} />
+              <MetricCard title="Trash removed" value={status?.rejectedCompanies ?? metrics.trash} note="Rejected company groups" darkMode={darkMode} />
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-3">
+              <MetricCard title="High intent" value={metrics.highIntent} note="Score 85+" darkMode={darkMode} />
+              <MetricCard title="Medium intent" value={metrics.mediumIntent} note="Score 65-84" darkMode={darkMode} />
+              <MetricCard title="Local fallback" value={status?.localFallbackCompanies ?? metrics.localFallback} note="Weighted scoring until Gemini runs" darkMode={darkMode} />
+            </div>
+
+            <div className={`${cardClass} p-6`}>
+              <h2 className="text-2xl font-black">Pipeline status</h2>
+              <div className="mt-5 grid gap-4 md:grid-cols-4">
+                <PipelineStep title="1. Collect" body="Job APIs, Adzuna, conferences, and startup/product sources." darkMode={darkMode} />
+                <PipelineStep title="2. Pre-clean" body="Rules remove obvious junk before model calls." darkMode={darkMode} />
+                <PipelineStep title="3. Merge" body="Multiple source rows become one company lead." darkMode={darkMode} />
+                <PipelineStep title="4. Gemini batch" body="Next 50 unique companies are cleaned, qualified, and scored." darkMode={darkMode} />
+              </div>
+            </div>
+
+            <div className={`${cardClass} p-6`}>
+              <h2 className="text-2xl font-black">Top scored leads preview</h2>
+              <div className="mt-5 grid gap-4">
+                {leadRows.slice(0, 5).map((row, index) => (
+                  <LeadCard key={`${row.id || row.rawName}-${index}`} row={row} darkMode={darkMode} compact />
+                ))}
+              </div>
+            </div>
+          </section>
+        )}
+
+        {activeTab === "sources" && (
+          <section className="grid gap-6 md:grid-cols-3">
+            <CountTable title="Source agents" counts={sourceCounts} darkMode={darkMode} />
+            <CountTable title="Source types" counts={sourceTypeCounts} darkMode={darkMode} />
+            <CountTable title="Scoring providers" counts={providerCounts} darkMode={darkMode} />
+          </section>
+        )}
+
+        {activeTab === "upload" && (
+          <section className={`${cardClass} p-8`}>
+            <h2 className="text-2xl font-black">Upload another CSV</h2>
+            <p className={`mt-2 max-w-2xl ${mutedText}`}>
+              Upload a CSV with the same columns to test another dataset.
+            </p>
+
+            <label
+              className={`mt-6 flex cursor-pointer flex-col items-center justify-center rounded-3xl border-2 border-dashed p-10 text-center ${
+                darkMode ? "border-slate-700 bg-slate-900" : "border-slate-300 bg-slate-50"
+              }`}
+            >
+              <span className="text-lg font-black">Choose CSV file</span>
+              <span className={`mt-2 text-sm ${mutedText}`}>Parsed locally in browser</span>
+              <input
+                type="file"
+                accept=".csv"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) handleUpload(file);
+                }}
+              />
+            </label>
+
+            {uploadError && (
+              <p className="mt-4 rounded-2xl bg-rose-100 px-4 py-3 text-sm font-bold text-rose-700">
+                {uploadError}
+              </p>
+            )}
+          </section>
+        )}
+
+        {activeTab === "leads" && (
+          <section className="space-y-5">
+            <div className={`${cardClass} p-5`}>
+              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <h2 className="text-2xl font-black">Ranked leads</h2>
+                  <p className={`mt-1 text-sm ${mutedText}`}>
+                    Showing {filteredLeads.length} accepted companies from {metrics.total} company rows.
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-3 md:flex-row">
+                  <input
+                    value={search}
+                    onChange={(event) => {
+                      setSearch(event.target.value);
+                      setPage(1);
+                    }}
+                    placeholder="Search company, source, signal..."
+                    className={`rounded-2xl border px-4 py-3 text-sm outline-none ${
+                      darkMode
+                        ? "border-slate-700 bg-slate-950 text-slate-100"
+                        : "border-slate-200 bg-white text-slate-900"
+                    }`}
+                  />
+
+                  <button
+                    onClick={() => {
+                      setOnlyHighIntent((value) => !value);
+                      setPage(1);
+                    }}
+                    className={`rounded-2xl px-4 py-3 text-sm font-bold ${
+                      onlyHighIntent
+                        ? "bg-emerald-600 text-white"
+                        : darkMode
+                          ? "bg-slate-800 text-slate-200"
+                          : "bg-slate-100 text-slate-700"
+                    }`}
+                  >
+                    High intent only
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-4">
+              {visibleLeads.map((row, index) => (
+                <LeadCard key={`${row.id || row.rawName}-${index}`} row={row} darkMode={darkMode} />
+              ))}
+            </div>
+
+            <div className="flex items-center justify-between">
+              <button
+                disabled={safePage <= 1}
+                onClick={() => setPage((value) => Math.max(1, value - 1))}
+                className="rounded-full bg-slate-950 px-5 py-3 text-sm font-bold text-white disabled:opacity-30"
+              >
+                Previous
+              </button>
+
+              <p className={`text-sm font-bold ${mutedText}`}>
+                Page {safePage} / {totalPages}
+              </p>
+
+              <button
+                disabled={safePage >= totalPages}
+                onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
+                className="rounded-full bg-slate-950 px-5 py-3 text-sm font-bold text-white disabled:opacity-30"
+              >
+                Next
+              </button>
+            </div>
+          </section>
+        )}
+
+        {activeTab === "trash" && (
+          <section className="space-y-4">
+            <div className={`${cardClass} p-5`}>
+              <h2 className="text-2xl font-black">Trash removed</h2>
+              <p className={`mt-1 text-sm ${mutedText}`}>
+                These rows are preserved to prove the system removes noisy leads instead of hiding them.
+              </p>
+            </div>
+
+            {trashRows.slice(0, 100).map((row, index) => (
+              <div key={`${row.id || row.rawName}-${index}`} className={`${cardClass} p-5`}>
+                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                  <div>
+                    <h3 className="text-lg font-black">{row.rawName || "Unknown company"}</h3>
+                    <p className={`mt-1 text-sm ${mutedText}`}>
+                      {row.sourceName || "Unknown source"} · mentions: {row.mentionCount || 1}
+                    </p>
+                  </div>
+                  <span className="rounded-full border bg-rose-100 px-3 py-1 text-xs font-black text-rose-800">
+                    Rejected
+                  </span>
+                </div>
+
+                <p className="mt-4 text-sm leading-6">
+                  {row.expectedTrashReason ||
+                    row.precleanReason ||
+                    row.aiBadLeadReason ||
+                    row.aiScoreReasoning ||
+                    "Rejected as weak or noisy lead."}
+                </p>
+              </div>
+            ))}
+          </section>
+        )}
+      </div>
+    </main>
+  );
+}
+
+function EnrichmentPanel({
+  status,
+  error,
+  message,
+  isEnriching,
+  onRefresh,
+  onEnrich,
+  darkMode,
+}: {
+  status: EnrichmentStatus | null;
+  error: string;
+  message: string;
+  isEnriching: boolean;
+  onRefresh: () => void;
+  onEnrich: () => void;
+  darkMode: boolean;
+}) {
+  const percent =
+    status && status.totalAcceptedCompanies > 0
+      ? Math.round((status.aiEnrichedCompanies / status.totalAcceptedCompanies) * 100)
+      : 0;
+
+  return (
+    <div className={darkMode ? "rounded-3xl border border-violet-900 bg-violet-950/30 p-6" : "rounded-3xl border border-violet-200 bg-violet-50 p-6"}>
+      <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
+        <div>
+          <p className="text-sm font-black uppercase tracking-[0.18em] text-violet-600">
+            Gemini enrichment queue
+          </p>
+          <h2 className="mt-2 text-2xl font-black">
+            {status
+              ? `${status.aiEnrichedCompanies} / ${status.totalAcceptedCompanies} companies AI enriched`
+              : "Loading enrichment status..."}
+          </h2>
+          <p className={darkMode ? "mt-2 text-sm text-violet-200" : "mt-2 text-sm text-violet-700"}>
+            {status?.isComplete
+              ? "All accepted companies have been AI enriched."
+              : status?.nextBatchStart && status?.nextBatchEnd
+                ? `Next batch: companies ${status.nextBatchStart}-${status.nextBatchEnd}.`
+                : "Next batch will appear after status loads."}
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-3 md:min-w-72">
+          <div className="h-3 overflow-hidden rounded-full bg-white/70">
+            <div className="h-full rounded-full bg-violet-600 transition-all" style={{ width: `${percent}%` }} />
+          </div>
+
+          <div className="flex gap-2">
+            <button
+              onClick={onEnrich}
+              disabled={isEnriching || !status || status.isComplete}
+              className="flex-1 rounded-2xl bg-violet-600 px-4 py-3 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {isEnriching
+                ? "Enriching..."
+                : status?.isComplete
+                  ? "Complete"
+                  : `Enrich next ${status?.batchSize || 50}`}
+            </button>
+
+            <button
+              onClick={onRefresh}
+              disabled={isEnriching}
+              className={darkMode ? "rounded-2xl bg-slate-900 px-4 py-3 text-sm font-black text-white" : "rounded-2xl bg-white px-4 py-3 text-sm font-black text-slate-900"}
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {message && (
+        <p className="mt-4 rounded-2xl bg-emerald-100 px-4 py-3 text-sm font-bold text-emerald-800">
+          {message}
+        </p>
+      )}
+
+      {error && (
+        <p className="mt-4 rounded-2xl bg-rose-100 px-4 py-3 text-sm font-bold text-rose-800">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function MetricCard({
+  title,
+  value,
+  note,
+  darkMode,
+}: {
+  title: string;
+  value: number;
+  note: string;
+  darkMode: boolean;
+}) {
+  return (
+    <div className={darkMode ? "rounded-3xl border border-slate-800 bg-slate-900 p-6" : "rounded-3xl border border-slate-200 bg-white p-6"}>
+      <p className={darkMode ? "text-sm font-bold text-slate-400" : "text-sm font-bold text-slate-500"}>{title}</p>
+      <p className="mt-3 text-4xl font-black">{value.toLocaleString()}</p>
+      <p className={darkMode ? "mt-2 text-xs text-slate-500" : "mt-2 text-xs text-slate-500"}>{note}</p>
+    </div>
+  );
+}
+
+function PipelineStep({ title, body, darkMode }: { title: string; body: string; darkMode: boolean }) {
+  return (
+    <div className={darkMode ? "rounded-2xl border border-slate-800 bg-slate-950 p-5" : "rounded-2xl border border-slate-200 bg-slate-50 p-5"}>
+      <h3 className="font-black">{title}</h3>
+      <p className={darkMode ? "mt-2 text-sm leading-6 text-slate-400" : "mt-2 text-sm leading-6 text-slate-600"}>{body}</p>
+    </div>
+  );
+}
+
+function CountTable({
+  title,
+  counts,
+  darkMode,
+}: {
+  title: string;
+  counts: Record<string, number>;
+  darkMode: boolean;
+}) {
+  const items = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 14);
+
+  return (
+    <div className={darkMode ? "rounded-3xl border border-slate-800 bg-slate-900 p-6" : "rounded-3xl border border-slate-200 bg-white p-6"}>
+      <h2 className="text-xl font-black">{title}</h2>
+      <div className="mt-5 space-y-3">
+        {items.map(([name, count]) => (
+          <div key={name} className="flex items-center justify-between gap-4">
+            <span className={darkMode ? "truncate text-sm text-slate-300" : "truncate text-sm text-slate-700"}>{name}</span>
+            <span className="rounded-full bg-slate-950 px-3 py-1 text-xs font-black text-white">
+              {count}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LeadCard({
+  row,
+  darkMode,
+  compact = false,
+}: {
+  row: LeadRow;
+  darkMode: boolean;
+  compact?: boolean;
+}) {
+  const score = getScore(row);
+  const signals = getSignals(row);
+  const sourceUrl = cleanText(row.sourceUrl || row.website);
+  const breakdown = getBreakdown(row);
+
+  return (
+    <article className={darkMode ? "rounded-3xl border border-slate-800 bg-slate-900 p-6" : "rounded-3xl border border-slate-200 bg-white p-6"}>
+      <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
+        <div className="flex gap-4">
+          <div className={`flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl text-xl font-black ${scoreColor(score)}`}>
+            {score}
+          </div>
+
+          <div>
+            <h3 className="text-2xl font-black">{row.rawName || "Unknown company"}</h3>
+            <p className={darkMode ? "mt-1 text-sm text-slate-400" : "mt-1 text-sm text-slate-500"}>
+              {row.sourceName || "Unknown source"} · mentions: {row.mentionCount || 1}
+            </p>
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              {[providerLabel(row), row.aiCompanyType, row.aiBuyingStage, row.aiIcpFit]
+                .filter(Boolean)
+                .map((item) => (
+                  <span
+                    key={String(item)}
+                    className={`rounded-full border px-3 py-1 text-xs font-black ${badgeColor(String(item))}`}
+                  >
+                    {String(item)}
+                  </span>
+                ))}
+            </div>
+          </div>
+        </div>
+
+        {sourceUrl && (
+          <a
+            href={sourceUrl.split(";")[0]}
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-full bg-slate-950 px-4 py-2 text-center text-sm font-bold text-white"
+          >
+            Open source
+          </a>
+        )}
+      </div>
+
+      <div className={compact ? "mt-4" : "mt-6 grid gap-4 md:grid-cols-2"}>
+        <InfoBlock title="Score reasoning" value={row.aiScoreReasoning || row.description || "No reasoning available."} darkMode={darkMode} />
+        {!compact && <InfoBlock title="Why now" value={row.aiWhyNow || "No why-now generated."} darkMode={darkMode} />}
+        {!compact && <InfoBlock title="Recommended buyer" value={row.aiRecommendedBuyer || "Founder, Sales, Growth, or Revenue leader."} darkMode={darkMode} />}
+        {!compact && <InfoBlock title="Outreach angle" value={row.aiOutreachAngle || "No outreach angle generated."} darkMode={darkMode} />}
+      </div>
+
+      {!compact && breakdown && (
+        <div className={darkMode ? "mt-5 rounded-2xl bg-slate-950 p-4" : "mt-5 rounded-2xl bg-slate-50 p-4"}>
+          <p className={darkMode ? "mb-3 text-xs font-black uppercase tracking-wider text-slate-500" : "mb-3 text-xs font-black uppercase tracking-wider text-slate-500"}>
+            Score breakdown
+          </p>
+          <div className="grid gap-2 md:grid-cols-3">
+            {Object.entries(breakdown).map(([key, value]) => (
+              <div key={key} className="flex items-center justify-between rounded-xl bg-white/70 px-3 py-2 text-xs font-bold text-slate-700">
+                <span>{key}</span>
+                <span>{String(value)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!compact && signals.length > 0 && (
+        <div className="mt-5">
+          <p className={darkMode ? "mb-2 text-xs font-black uppercase tracking-wider text-slate-500" : "mb-2 text-xs font-black uppercase tracking-wider text-slate-500"}>
+            Signals
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {signals.map((signal) => (
+              <span key={signal} className={darkMode ? "rounded-full bg-slate-800 px-3 py-1 text-xs font-bold text-slate-300" : "rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-700"}>
+                {signal}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </article>
+  );
+}
+
+function InfoBlock({ title, value, darkMode }: { title: string; value: string; darkMode: boolean }) {
+  return (
+    <div className={darkMode ? "rounded-2xl bg-slate-950 p-4" : "rounded-2xl bg-slate-50 p-4"}>
+      <p className={darkMode ? "text-xs font-black uppercase tracking-wider text-slate-500" : "text-xs font-black uppercase tracking-wider text-slate-500"}>
+        {title}
+      </p>
+      <p className={darkMode ? "mt-2 text-sm leading-6 text-slate-300" : "mt-2 text-sm leading-6 text-slate-700"}>
+        {value}
+      </p>
+    </div>
+  );
+}

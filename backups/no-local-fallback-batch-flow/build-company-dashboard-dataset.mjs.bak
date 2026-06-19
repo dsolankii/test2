@@ -1,0 +1,428 @@
+import fs from "node:fs";
+import path from "node:path";
+
+const DATA_DIR = path.join(process.cwd(), "data");
+
+const PRECLEAN_JSON = path.join(DATA_DIR, "real-source-mentions-preclean.json");
+const REJECTED_JSON = path.join(DATA_DIR, "real-source-mentions-rejected-preclean.json");
+const AI_COMPANY_JSON = path.join(DATA_DIR, "ai-enriched-company-leads.json");
+
+const OUTPUT_JSON = path.join(DATA_DIR, "company-dashboard-leads.json");
+const OUTPUT_CSV = path.join(DATA_DIR, "company-dashboard-leads.csv");
+const LEGACY_DASHBOARD_JSON = path.join(DATA_DIR, "raw-company-mentions.json");
+
+function readJson(filePath) {
+  if (!fs.existsSync(filePath)) return [];
+  return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+}
+
+function cleanText(value = "") {
+  return String(value)
+    .replace(/[�]/g, "")
+    .replace(/\r?\n|\r/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeCompanyName(name = "") {
+  return cleanText(name)
+    .toLowerCase()
+    .replace(/\b(inc|inc\.|llc|ltd|ltd\.|corp|corp\.|corporation|company|co|co\.|limited|plc|gmbh|sa|ag)\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function companyKeyFromName(name = "") {
+  return normalizeCompanyName(name) || cleanText(name).toLowerCase().replace(/[^a-z0-9]+/g, "_");
+}
+
+function getCompanyName(row) {
+  return cleanText(row.rawName || row.companyName || row.company || row.name || row.title || "");
+}
+
+function toNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function unique(values) {
+  return Array.from(new Set(values.map(cleanText).filter(Boolean)));
+}
+
+function groupCompanies(rows) {
+  const map = new Map();
+
+  for (const row of rows) {
+    const name = getCompanyName(row);
+    const key = row.companyKey || companyKeyFromName(name);
+
+    if (!key) continue;
+
+    if (!map.has(key)) {
+      map.set(key, {
+        companyKey: key,
+        companyName: name,
+        rawNames: [],
+        websites: [],
+        sourceNames: [],
+        sourceTypes: [],
+        sourceUrls: [],
+        countries: [],
+        descriptions: [],
+        precleanReasons: [],
+        latestActivityDate: "",
+        mentionCount: 0,
+        rows: [],
+      });
+    }
+
+    const company = map.get(key);
+    company.rawNames.push(name);
+    company.websites.push(row.website || "");
+    company.sourceNames.push(row.sourceName || "");
+    company.sourceTypes.push(row.sourceType || "");
+    company.sourceUrls.push(row.sourceUrl || row.website || "");
+    company.countries.push(row.country || "");
+    company.descriptions.push(row.description || row.homepageText || row.careersText || "");
+    company.precleanReasons.push(row.precleanReason || "");
+    company.mentionCount += 1;
+    company.rows.push(row);
+
+    const date = cleanText(row.lastActivityDate || "");
+    if (date && date > company.latestActivityDate) company.latestActivityDate = date;
+  }
+
+  return Array.from(map.values()).map((company) => ({
+    ...company,
+    rawNames: unique(company.rawNames),
+    websites: unique(company.websites),
+    sourceNames: unique(company.sourceNames),
+    sourceTypes: unique(company.sourceTypes),
+    sourceUrls: unique(company.sourceUrls),
+    countries: unique(company.countries),
+    descriptions: unique(company.descriptions),
+    precleanReasons: unique(company.precleanReasons),
+  }));
+}
+
+function hasAny(text, terms) {
+  const lower = cleanText(text).toLowerCase();
+  return terms.some((term) => lower.includes(term));
+}
+
+function buildEvidenceText(company) {
+  return [
+    company.companyName,
+    company.rawNames.join(" "),
+    company.sourceNames.join(" "),
+    company.sourceTypes.join(" "),
+    company.descriptions.join(" "),
+  ].join(" ");
+}
+
+function localFallbackScore(company) {
+  const text = buildEvidenceText(company);
+
+  let icpFit = 5;
+  let outboundNeed = 5;
+  let growthTrigger = 5;
+  let evidenceQuality = 5;
+  let urgency = 3;
+  let buyerClarity = 1;
+  let negativePenalty = 0;
+
+  if (hasAny(text, ["saas", "software", "platform", "api", "enterprise", "b2b", "cloud", "data", "security"])) {
+    icpFit += 15;
+  }
+
+  if (hasAny(text, ["sales", "account executive", "sdr", "bdr", "business development", "partnerships", "revenue"])) {
+    outboundNeed += 15;
+    buyerClarity += 3;
+  }
+
+  if (hasAny(text, ["growth", "expansion", "market", "demand generation", "lead generation", "user acquisition", "customer acquisition"])) {
+    growthTrigger += 12;
+    urgency += 4;
+  }
+
+  if (company.mentionCount >= 3) evidenceQuality += 5;
+  if (company.sourceTypes.some((type) => /job|hiring|adzuna|remote/i.test(type))) {
+    evidenceQuality += 5;
+    urgency += 2;
+  }
+
+  if (hasAny(text, ["agency", "marketing agency", "staffing", "recruiting", "jobot", "hays"])) {
+    negativePenalty -= 20;
+  }
+
+  if (hasAny(text, ["event organiser", "agenda", "speaker", "tickets", "conference label"])) {
+    negativePenalty -= 30;
+  }
+
+  icpFit = Math.min(25, icpFit);
+  outboundNeed = Math.min(25, outboundNeed);
+  growthTrigger = Math.min(20, growthTrigger);
+  evidenceQuality = Math.min(15, evidenceQuality);
+  urgency = Math.min(10, urgency);
+  buyerClarity = Math.min(5, buyerClarity);
+
+  const score = Math.max(
+    0,
+    Math.min(100, Math.round(icpFit + outboundNeed + growthTrigger + evidenceQuality + urgency + buyerClarity + negativePenalty))
+  );
+
+  let decision = "research_more";
+  let buyingStage = "research_more";
+  let icp = "low";
+
+  if (score >= 85) {
+    decision = "warm_lead";
+    buyingStage = "medium_intent";
+    icp = "high";
+  } else if (score >= 65) {
+    decision = "nurture";
+    buyingStage = "low_intent";
+    icp = "medium";
+  } else if (score < 30) {
+    decision = "not_relevant";
+    buyingStage = "not_relevant";
+    icp = "not_fit";
+  }
+
+  return {
+    score,
+    confidence: Math.min(60, Math.max(25, evidenceQuality * 4)),
+    decision,
+    buyingStage,
+    icpFit: icp,
+    scoreBreakdown: {
+      icpFit,
+      outboundNeed,
+      growthTrigger,
+      evidenceQuality,
+      urgency,
+      buyerClarity,
+      negativePenalty,
+    },
+  };
+}
+
+function buildLocalFallbackRow(company) {
+  const local = localFallbackScore(company);
+
+  return {
+    id: `local_company_${company.companyKey}`,
+    companyKey: company.companyKey,
+    rawName: company.companyName,
+    cleanCompanyName: company.companyName,
+    website: company.websites.join("; "),
+    sourceName: company.sourceNames.join("; "),
+    sourceType: company.sourceTypes.join("; "),
+    sourceUrl: company.sourceUrls.join("; "),
+    country: company.countries.join("; "),
+    latestActivityDate: company.latestActivityDate,
+    mentionCount: company.mentionCount,
+    description: company.descriptions.join(" ").slice(0, 1200),
+
+    aiGenerated: false,
+    aiProvider: "local-provisional-fallback",
+    aiModel: "rules",
+    aiReviewedAt: "",
+
+    aiEntityType: "unknown",
+    aiIsRealCompany: true,
+    aiCompanyType: "unknown",
+
+    aiIsPotentialCustomer: local.score >= 50,
+    aiIsBadLead: local.score < 30,
+    aiBadLeadReason: local.score < 30 ? "Provisional local rules found weak or negative buying signal." : "",
+
+    aiIcpFit: local.icpFit,
+    aiBuyingStage: local.buyingStage,
+    aiDecision: local.decision,
+    aiBuyerNeed: "unknown",
+    aiSalesMotion: "unknown",
+    aiCompanySizeGuess: "unknown",
+
+    aiSignals: company.sourceTypes.map((type) => `source evidence: ${type}`),
+    aiEvidenceSignals: [],
+
+    aiIntentScore: local.score,
+    aiConfidence: local.confidence,
+    aiConfidenceReason: "Provisional local score. Needs Gemini review for final qualification.",
+
+    aiScoreBreakdown: local.scoreBreakdown,
+    aiScoreReasoning: "Provisional score from source types, keywords, mention count, and negative filters. Needs Gemini review.",
+    aiWhyNow: "Needs Gemini review before final outreach prioritization.",
+    aiRecommendedBuyer: "Research sales, growth, revenue, or founder contact.",
+    aiOutreachAngle: "Pending Gemini review.",
+    aiNextAction: "Click Enrich next 50 to get AI qualification.",
+    aiDisqualifiers: [],
+  };
+}
+
+function buildAiRow(company, aiRow) {
+  return {
+    ...buildLocalFallbackRow(company),
+    ...aiRow,
+    id: aiRow.id || `ai_company_${company.companyKey}`,
+    companyKey: company.companyKey,
+    rawName: aiRow.rawName || aiRow.cleanCompanyName || aiRow.companyName || company.companyName,
+    website: aiRow.website || company.websites.join("; "),
+    sourceName: aiRow.sourceName || company.sourceNames.join("; "),
+    sourceType: aiRow.sourceType || company.sourceTypes.join("; "),
+    sourceUrl: aiRow.sourceUrl || company.sourceUrls.join("; "),
+    country: aiRow.country || company.countries.join("; "),
+    latestActivityDate: aiRow.latestActivityDate || company.latestActivityDate,
+    mentionCount: aiRow.mentionCount || company.mentionCount,
+    description: aiRow.description || company.descriptions.join(" ").slice(0, 1200),
+  };
+}
+
+function buildRejectedRow(company) {
+  const reason = company.precleanReasons[0] || "Rejected by light hygiene filter.";
+
+  return {
+    id: `rejected_company_${company.companyKey}`,
+    companyKey: company.companyKey,
+    rawName: company.companyName,
+    cleanCompanyName: company.companyName,
+    website: company.websites.join("; "),
+    sourceName: company.sourceNames.join("; "),
+    sourceType: company.sourceTypes.join("; "),
+    sourceUrl: company.sourceUrls.join("; "),
+    country: company.countries.join("; "),
+    latestActivityDate: company.latestActivityDate,
+    mentionCount: company.mentionCount,
+    description: company.descriptions.join(" ").slice(0, 1200),
+
+    expectedCategory: "trash",
+    expectedTrashReason: reason,
+
+    aiGenerated: false,
+    aiProvider: "preclean-rules",
+    aiModel: "light-hygiene-filter",
+    aiReviewedAt: "",
+
+    aiEntityType: "event_or_conference_label",
+    aiIsRealCompany: false,
+    aiCompanyType: "unknown",
+    aiIsPotentialCustomer: false,
+    aiIsBadLead: true,
+    aiBadLeadReason: reason,
+    aiIcpFit: "not_fit",
+    aiBuyingStage: "not_relevant",
+    aiDecision: "trash",
+    aiBuyerNeed: "none",
+    aiSalesMotion: "unknown",
+    aiCompanySizeGuess: "unknown",
+    aiSignals: [],
+    aiEvidenceSignals: [],
+    aiIntentScore: 0,
+    aiConfidence: 95,
+    aiConfidenceReason: "Hard rejected by light hygiene filter.",
+    aiScoreBreakdown: {
+      icpFit: 0,
+      outboundNeed: 0,
+      growthTrigger: 0,
+      evidenceQuality: 0,
+      urgency: 0,
+      buyerClarity: 0,
+      negativePenalty: -40,
+    },
+    aiScoreReasoning: reason,
+    aiWhyNow: "",
+    aiRecommendedBuyer: "",
+    aiOutreachAngle: "",
+    aiNextAction: "Do not contact.",
+    aiDisqualifiers: [reason],
+  };
+}
+
+function csvEscape(value) {
+  const text = Array.isArray(value)
+    ? value.map((item) => (typeof item === "object" ? JSON.stringify(item) : String(item))).join("; ")
+    : typeof value === "object" && value !== null
+      ? JSON.stringify(value)
+      : String(value ?? "");
+
+  if (/[",\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
+function writeCsv(filePath, rows) {
+  const preferredKeys = [
+    "companyKey",
+    "rawName",
+    "aiIntentScore",
+    "aiConfidence",
+    "aiDecision",
+    "aiBuyingStage",
+    "aiIcpFit",
+    "aiBuyerNeed",
+    "aiSalesMotion",
+    "aiCompanyType",
+    "aiProvider",
+    "aiGenerated",
+    "aiScoreReasoning",
+    "aiWhyNow",
+    "aiRecommendedBuyer",
+    "aiOutreachAngle",
+    "aiNextAction",
+    "mentionCount",
+    "sourceName",
+    "sourceType",
+    "sourceUrl",
+  ];
+
+  const allKeys = Array.from(
+    rows.reduce((set, row) => {
+      Object.keys(row).forEach((key) => set.add(key));
+      return set;
+    }, new Set(preferredKeys))
+  );
+
+  const csv = [
+    allKeys.map(csvEscape).join(","),
+    ...rows.map((row) => allKeys.map((key) => csvEscape(row[key])).join(",")),
+  ].join("\n");
+
+  fs.writeFileSync(filePath, csv);
+}
+
+const precleanRows = readJson(PRECLEAN_JSON);
+const rejectedRows = readJson(REJECTED_JSON);
+const aiRows = readJson(AI_COMPANY_JSON);
+
+const acceptedCompanies = groupCompanies(precleanRows);
+const rejectedCompanies = groupCompanies(rejectedRows);
+
+const aiByKey = new Map(aiRows.map((row) => [row.companyKey, row]));
+
+const acceptedDashboardRows = acceptedCompanies.map((company) => {
+  const aiRow = aiByKey.get(company.companyKey);
+  return aiRow ? buildAiRow(company, aiRow) : buildLocalFallbackRow(company);
+});
+
+const rejectedDashboardRows = rejectedCompanies.map(buildRejectedRow);
+
+const finalRows = [...acceptedDashboardRows, ...rejectedDashboardRows].sort(
+  (a, b) => toNumber(b.aiIntentScore) - toNumber(a.aiIntentScore)
+);
+
+fs.writeFileSync(OUTPUT_JSON, JSON.stringify(finalRows, null, 2));
+fs.writeFileSync(LEGACY_DASHBOARD_JSON, JSON.stringify(finalRows, null, 2));
+writeCsv(OUTPUT_CSV, finalRows);
+
+console.log("Company-level dashboard dataset built");
+console.log("-------------------------------------");
+console.log(`Pre-clean rows: ${precleanRows.length}`);
+console.log(`Unique accepted companies: ${acceptedCompanies.length}`);
+console.log(`AI-enriched companies used: ${acceptedCompanies.filter((company) => aiByKey.has(company.companyKey)).length}`);
+console.log(`Local provisional fallback companies: ${acceptedCompanies.filter((company) => !aiByKey.has(company.companyKey)).length}`);
+console.log(`Rejected companies: ${rejectedCompanies.length}`);
+console.log(`Final dashboard company rows: ${finalRows.length}`);
+console.log(`Wrote ${OUTPUT_JSON}`);
+console.log(`Wrote ${OUTPUT_CSV}`);
+console.log(`Updated ${LEGACY_DASHBOARD_JSON}`);
