@@ -2,7 +2,10 @@ import { access } from "fs/promises";
 import { constants } from "fs";
 import { spawn } from "child_process";
 import path from "path";
-import { getLeadgridDataDir } from "@/lib/data-dir";
+import {
+  LEADGRID_BASE_DATA_DIR,
+  getLeadgridWorkspaceId,
+} from "@/lib/data-dir";
 import { pullBlobData, pushBlobData } from "@/lib/blob-store";
 
 export type RunLocalScriptResult = {
@@ -30,7 +33,7 @@ function assertScriptOk(result: RunLocalScriptResult, scriptPath: string) {
     `Script failed: ${scriptPath}`,
     `Exit code: ${result.code ?? "unknown"}`,
     result.stderr ? `stderr:\n${result.stderr}` : "",
-    result.stdout ? `stdout:\n${result.stdout}` : ""
+    result.stdout ? `stdout:\n${result.stdout}` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -52,8 +55,13 @@ function runNodeScript(
       cwd: process.cwd(),
       env: {
         ...process.env,
-        LEADGRID_DATA_DIR: getLeadgridDataDir()
-      }
+
+        // IMPORTANT:
+        // Pass only the base data dir to scripts.
+        // scripts/data-dir.mjs will append /users/<LEADGRID_USER_ID>.
+        LEADGRID_DATA_DIR: LEADGRID_BASE_DATA_DIR,
+        LEADGRID_USER_ID: getLeadgridWorkspaceId(),
+      },
     });
 
     let stdout = "";
@@ -68,7 +76,7 @@ function runNodeScript(
         ok: false,
         code: null,
         stdout,
-        stderr: `${stderr}\nTimed out after ${timeoutMs}ms`.trim()
+        stderr: `${stderr}\nTimed out after ${timeoutMs}ms`.trim(),
       });
     }, timeoutMs);
 
@@ -88,7 +96,7 @@ function runNodeScript(
         ok: code === 0,
         code,
         stdout,
-        stderr
+        stderr,
       });
     });
 
@@ -100,7 +108,7 @@ function runNodeScript(
         ok: false,
         code: null,
         stdout,
-        stderr: `${stderr}\n${error.message}`.trim()
+        stderr: `${stderr}\n${error.message}`.trim(),
       });
     });
   });
@@ -127,7 +135,7 @@ export async function runLocalScript(
         ok: true,
         code: 0,
         stdout: `${scriptPath} completed through imported Blob SDK`,
-        stderr: ""
+        stderr: "",
       };
     }
 

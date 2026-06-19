@@ -21,7 +21,6 @@ export function getLeadgridDataDir() {
   return path.join(LEADGRID_BASE_DATA_DIR, "users", getLeadgridWorkspaceId());
 }
 
-// Backwards-compatible export. Prefer getLeadgridDataDir() in new code.
 export const LEADGRID_DATA_DIR = getLeadgridDataDir();
 
 export function dataPath(...parts: string[]) {
