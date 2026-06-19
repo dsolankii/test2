@@ -30,10 +30,7 @@ yarn-error.log*
 
 # env files
 .env
-.env.local
-.env.*.local
-
-# keep example env
+.env*
 !.env.example
 
 # vercel
@@ -51,13 +48,3 @@ next-env.d.ts
 /data/.*.lock
 /data/*.log
 !/data/.gitkeep
-
-# LeadGrid runtime data: generated from real extraction/pre-clean/LLM qualification.
-# Do not commit generated leads or local pipeline state.
-/data/*.json
-/data/*.csv
-/data/*.txt
-/data/.*.lock
-/data/*.log
-!/data/.gitkeep
-.env*
