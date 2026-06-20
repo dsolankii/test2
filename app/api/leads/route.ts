@@ -10,6 +10,33 @@ export const dynamic = "force-dynamic";
 
 type Lead = Record<string, any>;
 
+const EMPTY_META = {
+  dataVersion: Date.now(),
+  totalAvailable: 0,
+  totalPages: 1,
+  currentPage: 0,
+  maxUnlockedPage: 0,
+  pageSize: 50,
+  visibleStart: 0,
+  visibleEnd: 0,
+  visibleLeadCount: 0,
+  scoredVisibleLeads: 0,
+  hiddenLeft: 0,
+  canGoPrev: false,
+  canGoNext: false,
+  canUnlockNext: false,
+  nextStart: 0,
+  nextEnd: 0,
+};
+
+function makePaths() {
+  return {
+    statePath: dataPath("leadgrid-visible-state.json"),
+    dashboardPath: dataPath("company-dashboard-leads.json"),
+    enrichedPath: dataPath("ai-enriched-company-leads.json"),
+  };
+}
+
 function getScore(lead: Lead) {
   const raw =
     lead.aiIntentScore ||
@@ -30,18 +57,11 @@ function getTime(lead: Lead) {
     lead.reviewedAt ||
     lead.createdAt ||
     lead.lastSeenAt ||
+    lead.lastActivityDate ||
     "";
 
   const value = Date.parse(String(raw));
   return Number.isFinite(value) ? value : 0;
-}
-
-function makePaths() {
-  return {
-    STATE_PATH: dataPath("leadgrid-visible-state.json"),
-    LEADS_PATH: dataPath("company-dashboard-leads.json"),
-    FALLBACK_LEADS_PATH: dataPath("ai-enriched-company-leads.json"),
-  };
 }
 
 async function readJsonArray(filePath: string) {
@@ -55,21 +75,23 @@ async function readJsonArray(filePath: string) {
 }
 
 async function readLeads() {
-  const { LEADS_PATH, FALLBACK_LEADS_PATH } = makePaths();
-  const dashboardRows = await readJsonArray(LEADS_PATH);
+  const { dashboardPath, enrichedPath } = makePaths();
+
+  const dashboardRows = await readJsonArray(dashboardPath);
   if (dashboardRows.length > 0) return dashboardRows;
-  return await readJsonArray(FALLBACK_LEADS_PATH);
+
+  return await readJsonArray(enrichedPath);
 }
 
 async function getDataVersion() {
-  const { LEADS_PATH, FALLBACK_LEADS_PATH } = makePaths();
+  const { dashboardPath, enrichedPath } = makePaths();
 
   try {
-    const info = await stat(LEADS_PATH);
+    const info = await stat(dashboardPath);
     return info.mtimeMs;
   } catch {
     try {
-      const info = await stat(FALLBACK_LEADS_PATH);
+      const info = await stat(enrichedPath);
       return info.mtimeMs;
     } catch {
       return Date.now();
@@ -78,10 +100,10 @@ async function getDataVersion() {
 }
 
 async function readState() {
-  const { STATE_PATH } = makePaths();
+  const { statePath } = makePaths();
 
   try {
-    const raw = await readFile(STATE_PATH, "utf8");
+    const raw = await readFile(statePath, "utf8");
     const state = JSON.parse(raw);
 
     return {
@@ -96,7 +118,7 @@ async function readState() {
         : 50,
     };
   } catch {
-    await mkdir(path.dirname(STATE_PATH), { recursive: true });
+    await mkdir(path.dirname(statePath), { recursive: true });
 
     const state = {
       currentPage: 0,
@@ -104,7 +126,12 @@ async function readState() {
       pageSize: 50,
     };
 
-    await writeFile(STATE_PATH, JSON.stringify(state, null, 2));
+    await writeFile(statePath, JSON.stringify(state, null, 2));
+
+    if (process.env.VERCEL) {
+      await runLocalScript("scripts/blob-push.mjs", 60 * 1000);
+    }
+
     return state;
   }
 }
@@ -117,7 +144,6 @@ export async function GET(request: Request) {
   }
 
   const allLeads = await readLeads();
-
   const sortedLeads = [...allLeads].sort((a, b) => {
     const scoreDiff = getScore(b) - getScore(a);
     if (scoreDiff !== 0) return scoreDiff;
@@ -127,11 +153,21 @@ export async function GET(request: Request) {
   const state = await readState();
   const totalAvailable = sortedLeads.length;
   const totalPages = Math.max(Math.ceil(totalAvailable / state.pageSize), 1);
-  const maxUnlockedPage = Math.min(Math.max(state.maxUnlockedPage, 0), totalPages - 1);
-  const currentPage = Math.min(Math.max(state.currentPage, 0), maxUnlockedPage);
+
+  const maxUnlockedPage = Math.min(
+    Math.max(state.maxUnlockedPage, 0),
+    totalPages - 1
+  );
+
+  const currentPage = Math.min(
+    Math.max(state.currentPage, 0),
+    maxUnlockedPage
+  );
+
   const startIndex = currentPage * state.pageSize;
   const endIndex = Math.min(startIndex + state.pageSize, totalAvailable);
   const pageLeads = sortedLeads.slice(startIndex, endIndex);
+
   const nextPage = Math.min(maxUnlockedPage + 1, totalPages - 1);
   const hasNextPrepared = maxUnlockedPage < totalPages - 1;
   const nextStart = hasNextPrepared ? nextPage * state.pageSize + 1 : 0;

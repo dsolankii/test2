@@ -3,42 +3,72 @@ import { readFile, writeFile, mkdir } from "fs/promises";
 import path from "path";
 import { dataPath } from "@/lib/data-dir";
 import { applyWorkspaceToRequest } from "@/lib/workspace";
+import { runLocalScript } from "@/lib/run-local-script";
 
-function getStatePath() {
-  return dataPath("leadgrid-visible-state.json");
-}
-function getLeadsPath() {
-  return dataPath("company-dashboard-leads.json");
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+function makePaths() {
+  return {
+    statePath: dataPath("leadgrid-visible-state.json"),
+    dashboardPath: dataPath("company-dashboard-leads.json"),
+    enrichedPath: dataPath("ai-enriched-company-leads.json"),
+  };
 }
 
-async function readTotalLeads() {
+async function readJsonArray(filePath: string) {
   try {
-    const raw = await readFile(getLeadsPath(), "utf8");
-    const leads = JSON.parse(raw);
-    return Array.isArray(leads) ? leads.length : 0;
+    const raw = await readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return 0;
+    return [];
   }
 }
 
+async function readTotalLeads() {
+  const { dashboardPath, enrichedPath } = makePaths();
+  const dashboardRows = await readJsonArray(dashboardPath);
+  if (dashboardRows.length > 0) return dashboardRows.length;
+  return (await readJsonArray(enrichedPath)).length;
+}
+
 async function readState() {
+  const { statePath } = makePaths();
+
   try {
-    const raw = await readFile(getStatePath(), "utf8");
+    const raw = await readFile(statePath, "utf8");
     const state = JSON.parse(raw);
 
     return {
-      currentPage: Number.isFinite(Number(state.currentPage)) ? Number(state.currentPage) : 0,
-      maxUnlockedPage: Number.isFinite(Number(state.maxUnlockedPage)) ? Number(state.maxUnlockedPage) : 0,
-      pageSize: Number.isFinite(Number(state.pageSize)) ? Number(state.pageSize) : 50,
+      currentPage: Number.isFinite(Number(state.currentPage))
+        ? Number(state.currentPage)
+        : 0,
+      maxUnlockedPage: Number.isFinite(Number(state.maxUnlockedPage))
+        ? Number(state.maxUnlockedPage)
+        : 0,
+      pageSize: Number.isFinite(Number(state.pageSize))
+        ? Number(state.pageSize)
+        : 50,
     };
   } catch {
-    return { currentPage: 0, maxUnlockedPage: 0, pageSize: 50 };
+    return {
+      currentPage: 0,
+      maxUnlockedPage: 0,
+      pageSize: 50,
+    };
   }
 }
 
 export async function POST(request: Request) {
   applyWorkspaceToRequest(request);
-  await mkdir(path.dirname(getStatePath()), { recursive: true });
+
+  if (process.env.VERCEL) {
+    await runLocalScript("scripts/blob-pull.mjs", 60 * 1000);
+  }
+
+  const { statePath } = makePaths();
+  await mkdir(path.dirname(statePath), { recursive: true });
 
   const body = await request.json().catch(() => ({}));
   const direction = body.direction === "prev" ? "prev" : "next";
@@ -46,7 +76,7 @@ export async function POST(request: Request) {
   const totalLeads = await readTotalLeads();
   const state = await readState();
   const totalPages = Math.max(Math.ceil(totalLeads / state.pageSize), 1);
-  const maxUnlockedPage = Math.min(state.maxUnlockedPage, totalPages - 1);
+  const maxUnlockedPage = Math.min(Math.max(state.maxUnlockedPage, 0), totalPages - 1);
 
   const nextPage =
     direction === "next"
@@ -59,12 +89,23 @@ export async function POST(request: Request) {
     pageSize: state.pageSize,
   };
 
-  await writeFile(getStatePath(), JSON.stringify(nextState, null, 2));
+  await writeFile(statePath, JSON.stringify(nextState, null, 2));
 
-  return NextResponse.json({
-    ok: true,
-    currentPage: nextPage,
-    maxUnlockedPage,
-    totalPages,
-  });
+  if (process.env.VERCEL) {
+    await runLocalScript("scripts/blob-push.mjs", 60 * 1000);
+  }
+
+  return NextResponse.json(
+    {
+      ok: true,
+      currentPage: nextPage,
+      maxUnlockedPage,
+      totalPages,
+    },
+    {
+      headers: {
+        "Cache-Control": "no-store",
+      },
+    }
+  );
 }
