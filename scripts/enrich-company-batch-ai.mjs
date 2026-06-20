@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import dotenv from "dotenv";
-import { GoogleGenAI } from "@google/genai";
 import { jsonrepair } from "jsonrepair";
 import { DATA_DIR, dataPath } from "./data-dir.mjs";
 
@@ -18,7 +17,7 @@ const MAX_EVIDENCE_CHARS_PER_ROW = 900;
 
 const aiProvider = process.env.AI_PROVIDER || "gemini";
 const aiApiKey = process.env.AI_API_KEY || process.env.GEMINI_API_KEY;
-const aiModel = process.env.AI_MODEL || "gemini-2.5-flash-lite";
+const aiModel = String(process.env.AI_MODEL || "gemini-2.5-flash-lite").trim();
 
 if (aiProvider !== "gemini") {
   throw new Error(`Unsupported AI_PROVIDER: ${aiProvider}. This script currently supports gemini.`);
@@ -27,9 +26,6 @@ if (aiProvider !== "gemini") {
 if (!aiApiKey) {
   throw new Error("Missing AI_API_KEY in .env.local");
 }
-
-const ai = new GoogleGenAI({ apiKey: aiApiKey });
-
 function readJson(filePath) {
   if (!fs.existsSync(filePath)) return [];
   return JSON.parse(fs.readFileSync(filePath, "utf-8"));
@@ -590,19 +586,61 @@ function companyPromptPayload(company) {
   };
 }
 
-async function requestAiResultsForCompanies(companies) {
-  const prompt = buildPrompt(companies.map(companyPromptPayload));
+async function callGeminiRest(prompt) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(aiModel)}:generateContent`;
 
-  const response = await ai.models.generateContent({
-    model: aiModel,
-    contents: prompt,
-    config: {
-      responseMimeType: "application/json",
-      temperature: 0.1,
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": aiApiKey,
     },
+    body: JSON.stringify({
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: prompt }],
+        },
+      ],
+      generationConfig: {
+        responseMimeType: "application/json",
+        temperature: 0.1,
+      },
+    }),
   });
 
-  const parsed = safeJsonParse(response.text || "[]");
+  const bodyText = await response.text();
+
+  if (!response.ok) {
+    fs.writeFileSync(RAW_RESPONSE_FILE, bodyText);
+    throw new Error(`Gemini REST request failed ${response.status}: ${bodyText.slice(0, 1000)}`);
+  }
+
+  let body;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    fs.writeFileSync(RAW_RESPONSE_FILE, bodyText);
+    throw new Error(`Gemini REST returned non-JSON response. Saved raw response to ${RAW_RESPONSE_FILE}`);
+  }
+
+  const text =
+    body?.candidates?.[0]?.content?.parts
+      ?.map((part) => part.text || "")
+      .join("") || "";
+
+  if (!text.trim()) {
+    fs.writeFileSync(RAW_RESPONSE_FILE, bodyText);
+    throw new Error(`Gemini REST returned empty text. Saved raw response to ${RAW_RESPONSE_FILE}`);
+  }
+
+  return text;
+}
+
+async function requestAiResultsForCompanies(companies) {
+  const prompt = buildPrompt(companies.map(companyPromptPayload));
+  const responseText = await callGeminiRest(prompt);
+  const parsed = safeJsonParse(responseText || "[]");
   const resultArray = Array.isArray(parsed) ? parsed : parsed.results || parsed.companies || [];
 
   if (!Array.isArray(resultArray)) {
