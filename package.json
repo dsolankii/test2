@@ -9,7 +9,6 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@google/genai": "^2.8.0",
     "@types/papaparse": "^5.5.2",
     "@vercel/blob": "^2.4.1",
     "dotenv": "^17.4.2",

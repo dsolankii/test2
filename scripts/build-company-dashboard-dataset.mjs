@@ -17,7 +17,7 @@ function keyFor(value) {
 }
 
 function getCompanyName(row) {
-  return clean(
+  return clean(row.rawName || 
     row.companyName ||
       row.company ||
       row.name ||

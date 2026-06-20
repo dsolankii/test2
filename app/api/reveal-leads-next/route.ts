@@ -8,12 +8,16 @@ import { applyWorkspaceToRequest } from "@/lib/workspace";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const STATE_PATH = dataPath("leadgrid-visible-state.json");
-const LEADS_PATH = dataPath("company-dashboard-leads.json");
+function getStatePath() {
+  return dataPath("leadgrid-visible-state.json");
+}
+function getLeadsPath() {
+  return dataPath("company-dashboard-leads.json");
+}
 
 async function readTotalLeads() {
   try {
-    const raw = await readFile(LEADS_PATH, "utf8");
+    const raw = await readFile(getLeadsPath(), "utf8");
     const leads = JSON.parse(raw);
     return Array.isArray(leads) ? leads.length : 0;
   } catch {
@@ -23,7 +27,7 @@ async function readTotalLeads() {
 
 async function readState() {
   try {
-    const raw = await readFile(STATE_PATH, "utf8");
+    const raw = await readFile(getStatePath(), "utf8");
     const state = JSON.parse(raw);
 
     return {
@@ -39,7 +43,7 @@ async function readState() {
 export async function POST(request: Request) {
   applyWorkspaceToRequest(request);
   try {
-    await mkdir(path.dirname(STATE_PATH), { recursive: true });
+    await mkdir(path.dirname(getStatePath()), { recursive: true });
 
     const beforeTotal = await readTotalLeads();
     const beforeState = await readState();
@@ -65,7 +69,7 @@ export async function POST(request: Request) {
       pageSize: state.pageSize,
     };
 
-    await writeFile(STATE_PATH, JSON.stringify(nextState, null, 2));
+    await writeFile(getStatePath(), JSON.stringify(nextState, null, 2));
 
     const nextPipelinePage = Math.min(nextUnlockedPage + 1, totalPages - 1);
     const hasNext = nextUnlockedPage < totalPages - 1;
