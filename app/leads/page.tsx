@@ -302,7 +302,7 @@ export default function LeadsPage() {
     if (!meta.canUnlockNext || prefetchQueuedRef.current) return;
 
     prefetchQueuedRef.current = true;
-    setPrefetchStatus("Preparing the next 50 in the background...");
+    setPrefetchStatus(meta.totalAvailable <= 0 ? "" : "Preparing the next 50 in the background...");
 
     try {
       const response = await fetch("/api/prefetch-next-batch", {
@@ -367,7 +367,7 @@ export default function LeadsPage() {
     const data = await response.json().catch(() => ({}));
 
     if (!response.ok || data.ok === false) {
-      throw new Error(data.error || `Request failed: ${url}`);
+      throw new Error(data.error || data.logs || `Request failed: ${url}`);
     }
 
     return data;
@@ -393,7 +393,7 @@ export default function LeadsPage() {
     if (movingPage) return;
 
     setMovingPage("unlock");
-    setPageMessage("LLM is reviewing the next 50 companies. Please wait...");
+    setPageMessage(leadMeta.totalAvailable <= 0 ? "LLM is reviewing the first 50 companies. Please wait..." : "LLM is reviewing the next 50 companies. Please wait...");
 
     try {
       await postJson("/api/reveal-leads-next");
@@ -506,11 +506,11 @@ export default function LeadsPage() {
             <div className="mt-4 grid gap-3">
               <button
                 onClick={() => {
-                  if (!loading && leadMeta.canUnlockNext && movingPage === null) {
+                  if (!loading && movingPage === null) {
                     unlockNext50();
                   }
                 }}
-                disabled={loading || !leadMeta.canUnlockNext || movingPage !== null}
+                disabled={loading || movingPage !== null}
                 className={
                   loading || !leadMeta.canUnlockNext || movingPage !== null
                     ? "retro-box w-full bg-slate-950 px-6 py-4 text-sm font-black uppercase tracking-[0.16em] text-white opacity-50 shadow-[8px_8px_0_rgba(139,92,246,0.65)]"
@@ -519,7 +519,7 @@ export default function LeadsPage() {
               >
                 {loading
                   ? "Loading"
-                  : !leadMeta.canUnlockNext
+                  : leadMeta.pendingReview <= 0 && !leadMeta.canUnlockNext
                     ? "All Done"
                     : movingPage === "unlock"
                       ? "LLM Reviewing"

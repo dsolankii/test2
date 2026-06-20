@@ -13,6 +13,8 @@ function makePaths() {
   return {
     statePath: dataPath("leadgrid-visible-state.json"),
     dashboardPath: dataPath("company-dashboard-leads.json"),
+    precleanPath: dataPath("real-source-mentions-preclean.json"),
+    aiPath: dataPath("ai-enriched-company-leads.json"),
   };
 }
 
@@ -26,11 +28,6 @@ async function readJsonArray(filePath: string) {
   }
 }
 
-async function readTotalLeads() {
-  const { dashboardPath } = makePaths();
-  return (await readJsonArray(dashboardPath)).length;
-}
-
 async function readState() {
   const { statePath } = makePaths();
 
@@ -39,15 +36,9 @@ async function readState() {
     const state = JSON.parse(raw);
 
     return {
-      currentPage: Number.isFinite(Number(state.currentPage))
-        ? Number(state.currentPage)
-        : 0,
-      maxUnlockedPage: Number.isFinite(Number(state.maxUnlockedPage))
-        ? Number(state.maxUnlockedPage)
-        : 0,
-      pageSize: Number.isFinite(Number(state.pageSize))
-        ? Number(state.pageSize)
-        : 50,
+      currentPage: Number.isFinite(Number(state.currentPage)) ? Number(state.currentPage) : 0,
+      maxUnlockedPage: Number.isFinite(Number(state.maxUnlockedPage)) ? Number(state.maxUnlockedPage) : 0,
+      pageSize: Number.isFinite(Number(state.pageSize)) ? Number(state.pageSize) : 50,
     };
   } catch {
     return {
@@ -58,16 +49,10 @@ async function readState() {
   }
 }
 
-async function prepareNextStrictLlmBatch() {
-  const preclean = await runLocalScript("scripts/preclean-real-sources.mjs", 10 * 60 * 1000);
-  const enrich = await runLocalScript("scripts/enrich-company-batch-ai.mjs", 25 * 60 * 1000);
-  const build = await runLocalScript("scripts/build-company-dashboard-dataset.mjs", 10 * 60 * 1000);
-
-  return {
-    preclean: preclean.stdout,
-    enrich: enrich.stdout,
-    build: build.stdout,
-  };
+async function writeState(state: { currentPage: number; maxUnlockedPage: number; pageSize: number }) {
+  const { statePath } = makePaths();
+  await mkdir(path.dirname(statePath), { recursive: true });
+  await writeFile(statePath, JSON.stringify(state, null, 2));
 }
 
 export async function POST(request: Request) {
@@ -78,105 +63,116 @@ export async function POST(request: Request) {
       await runLocalScript("scripts/blob-pull.mjs", 60 * 1000);
     }
 
-    const { statePath } = makePaths();
-    await mkdir(path.dirname(statePath), { recursive: true });
-
+    const { dashboardPath, precleanPath, aiPath } = makePaths();
     const state = await readState();
-    const currentTotal = await readTotalLeads();
-    const currentLastPreparedPage = Math.max(
-      Math.ceil(currentTotal / state.pageSize) - 1,
-      0
-    );
+    const pageSize = state.pageSize || 50;
 
-    const currentMaxUnlocked = Math.min(
-      Math.max(state.maxUnlockedPage, 0),
-      currentLastPreparedPage
-    );
+    const candidatesBefore = await readJsonArray(precleanPath);
+    let dashboardRows = await readJsonArray(dashboardPath);
+    let aiRows = await readJsonArray(aiPath);
 
-    const nextPage = currentMaxUnlocked + 1;
-    let totalLeads = currentTotal;
-    let lastPreparedPage = currentLastPreparedPage;
+    if (candidatesBefore.length <= 0) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "No pre-clean candidates found. Run Scan and Pre-clean first.",
+          candidates: 0,
+          reviewed: dashboardRows.length,
+        },
+        { status: 409, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    let totalLeads = dashboardRows.length;
+    let totalPages = Math.max(Math.ceil(totalLeads / pageSize), 1);
+    let lastPreparedPage = Math.max(totalPages - 1, 0);
+    let currentMaxUnlocked = Math.min(Math.max(state.maxUnlockedPage, 0), lastPreparedPage);
+
+    let targetPage = totalLeads === 0 ? 0 : currentMaxUnlocked + 1;
     let reviewedMore = false;
+    let logs = "";
 
-    if (nextPage > lastPreparedPage) {
+    const needsLlmBatch = totalLeads === 0 || targetPage > lastPreparedPage;
+
+    if (needsLlmBatch) {
       reviewedMore = true;
-      await prepareNextStrictLlmBatch();
+
+      const enrich = await runLocalScript("scripts/enrich-company-batch-ai.mjs", 25 * 60 * 1000);
+      logs += "\n\n--- enrich-company-batch-ai.mjs ---\n" + enrich.stdout + "\n" + enrich.stderr;
+
+      const build = await runLocalScript("scripts/build-company-dashboard-dataset.mjs", 10 * 60 * 1000);
+      logs += "\n\n--- build-company-dashboard-dataset.mjs ---\n" + build.stdout + "\n" + build.stderr;
 
       if (process.env.VERCEL) {
         await runLocalScript("scripts/blob-pull.mjs", 60 * 1000);
       }
 
-      totalLeads = await readTotalLeads();
-      lastPreparedPage = Math.max(Math.ceil(totalLeads / state.pageSize) - 1, 0);
-    }
+      dashboardRows = await readJsonArray(dashboardPath);
+      aiRows = await readJsonArray(aiPath);
 
-    if (nextPage > lastPreparedPage) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error:
-            "LLM review finished but no new reviewed leads were produced. Check Review/Qualification logs.",
-          totalLeads,
-          currentPage: Math.min(state.currentPage, currentMaxUnlocked),
-          maxUnlockedPage: currentMaxUnlocked,
-          reviewedMore,
-        },
-        {
-          status: 409,
-          headers: {
-            "Cache-Control": "no-store",
+      totalLeads = dashboardRows.length;
+      totalPages = Math.max(Math.ceil(totalLeads / pageSize), 1);
+      lastPreparedPage = Math.max(totalPages - 1, 0);
+
+      if (totalLeads <= 0) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error:
+              "LLM ran, but dashboard is still 0. The AI step did not produce usable reviewed rows.",
+            candidates: candidatesBefore.length,
+            aiRows: aiRows.length,
+            dashboardRows: totalLeads,
+            logs: logs.slice(-4000),
           },
-        }
-      );
+          { status: 500, headers: { "Cache-Control": "no-store" } }
+        );
+      }
+
+      targetPage = Math.min(targetPage, lastPreparedPage);
     }
 
     const nextState = {
-      currentPage: nextPage,
-      maxUnlockedPage: nextPage,
-      pageSize: state.pageSize,
+      currentPage: targetPage,
+      maxUnlockedPage: Math.max(currentMaxUnlocked, targetPage),
+      pageSize,
     };
 
-    await writeFile(statePath, JSON.stringify(nextState, null, 2));
+    await writeState(nextState);
 
     if (process.env.VERCEL) {
       await runLocalScript("scripts/blob-push.mjs", 60 * 1000);
     }
 
-    const totalPages = Math.max(Math.ceil(totalLeads / state.pageSize), 1);
-    const upcomingPage = Math.min(nextPage + 1, lastPreparedPage);
-    const hasNextPrepared = nextPage < lastPreparedPage;
+    const upcomingPage = nextState.maxUnlockedPage + 1;
+    const hasPreparedNext = upcomingPage <= lastPreparedPage;
+    const hasPending = candidatesBefore.length > totalLeads;
 
     return NextResponse.json(
       {
         ok: true,
-        currentPage: nextPage,
-        maxUnlockedPage: nextPage,
-        totalPages,
         reviewedMore,
-        canUnlockNext: hasNextPrepared,
-        nextStart: hasNextPrepared ? upcomingPage * state.pageSize + 1 : totalLeads + 1,
-        nextEnd: hasNextPrepared
-          ? Math.min((upcomingPage + 1) * state.pageSize, totalLeads)
-          : totalLeads + state.pageSize,
+        candidates: candidatesBefore.length,
+        aiRows: aiRows.length,
+        dashboardRows: totalLeads,
+        currentPage: nextState.currentPage,
+        maxUnlockedPage: nextState.maxUnlockedPage,
+        totalPages,
+        canGoPrev: nextState.currentPage > 0,
+        canGoNext: nextState.currentPage < nextState.maxUnlockedPage,
+        canUnlockNext: hasPreparedNext || hasPending,
+        nextStart: hasPreparedNext ? upcomingPage * pageSize + 1 : totalLeads + 1,
+        nextEnd: hasPreparedNext ? Math.min((upcomingPage + 1) * pageSize, totalLeads) : totalLeads + pageSize,
       },
-      {
-        headers: {
-          "Cache-Control": "no-store",
-        },
-      }
+      { headers: { "Cache-Control": "no-store" } }
     );
   } catch (error) {
     return NextResponse.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : "Next page failed",
+        error: error instanceof Error ? error.message : "Reveal failed",
       },
-      {
-        status: 500,
-        headers: {
-          "Cache-Control": "no-store",
-        },
-      }
+      { status: 500, headers: { "Cache-Control": "no-store" } }
     );
   }
 }
