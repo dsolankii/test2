@@ -709,20 +709,82 @@ async function run() {
 
   const resultArray = await enrichBatchWithRetry(batch);
 
-  const resultsByKey = new Map(
-    resultArray
-      .filter((result) => result && result.companyKey)
-      .map((result) => [String(result.companyKey), result])
-  );
+  const resultArrayRaw = Array.isArray(resultArray) ? resultArray : [];
+
+  const resultsByKey = new Map();
+  resultArrayRaw.forEach((result, index) => {
+    if (result && result.companyKey) {
+      resultsByKey.set(String(result.companyKey), { result, index });
+    }
+  });
+
+  const usedResultIndexes = new Set();
+
+  function findResultForCompany(inputCompany, index) {
+    const exact = resultsByKey.get(inputCompany.companyKey);
+    if (exact && !usedResultIndexes.has(exact.index)) {
+      usedResultIndexes.add(exact.index);
+      return { result: exact.result, matchMethod: "companyKey" };
+    }
+
+    const inputName = normalizeCompanyName(inputCompany.companyName);
+
+    for (let i = 0; i < resultArrayRaw.length; i += 1) {
+      if (usedResultIndexes.has(i)) continue;
+
+      const candidate = resultArrayRaw[i];
+      if (!candidate || typeof candidate !== "object") continue;
+
+      const candidateName = normalizeCompanyName(
+        candidate.cleanCompanyName ||
+          candidate.companyName ||
+          candidate.rawName ||
+          ""
+      );
+
+      if (candidateName && inputName && candidateName === inputName) {
+        usedResultIndexes.add(i);
+        return { result: candidate, matchMethod: "companyName" };
+      }
+    }
+
+    if (
+      resultArrayRaw[index] &&
+      typeof resultArrayRaw[index] === "object" &&
+      !usedResultIndexes.has(index)
+    ) {
+      usedResultIndexes.add(index);
+      return { result: resultArrayRaw[index], matchMethod: "position" };
+    }
+
+    return null;
+  }
 
   const newRows = [];
 
-  for (const inputCompany of batch) {
-    const result = resultsByKey.get(inputCompany.companyKey);
+  for (let index = 0; index < batch.length; index += 1) {
+    const inputCompany = batch[index];
+    const matched = findResultForCompany(inputCompany, index);
 
-    if (!result) {
+    if (!matched) {
       console.log(`Missing AI result for: ${inputCompany.companyName}`);
       continue;
+    }
+
+    const result = {
+      ...matched.result,
+      companyKey: inputCompany.companyKey,
+      companyName: matched.result.companyName || inputCompany.companyName,
+      cleanCompanyName:
+        matched.result.cleanCompanyName ||
+        matched.result.companyName ||
+        inputCompany.companyName,
+    };
+
+    if (matched.matchMethod !== "companyKey") {
+      console.warn(
+        `AI result key repaired by ${matched.matchMethod} for: ${inputCompany.companyName}`
+      );
     }
 
     const normalized = normalizeResult(result, inputCompany);
@@ -730,6 +792,12 @@ async function run() {
 
     console.log(
       `${normalized.rawName} → ${normalized.aiIntentScore} | ${normalized.aiDecision} | ${normalized.aiConfidence}% confidence | ${normalized.aiIcpFit} | mentions: ${normalized.mentionCount}`
+    );
+  }
+
+  if (newRows.length === 0) {
+    throw new Error(
+      `AI returned ${resultArrayRaw.length} result objects, but none could be matched to the requested batch. Check ${RAW_RESPONSE_FILE}`
     );
   }
 
