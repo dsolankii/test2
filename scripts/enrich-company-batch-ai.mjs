@@ -11,28 +11,30 @@ const OUTPUT_JSON = dataPath("ai-enriched-company-leads.json");
 const OUTPUT_CSV = dataPath("ai-enriched-company-leads.csv");
 const RAW_RESPONSE_FILE = dataPath("ai-company-batch-last-raw-response.txt");
 
-const BATCH_SIZE = 50;
-const MAX_EVIDENCE_ROWS_PER_COMPANY = 8;
-const MAX_EVIDENCE_CHARS_PER_ROW = 900;
+const BATCH_SIZE = Number(process.env.AI_BATCH_SIZE || 50);
+const AI_SUB_BATCH_SIZE = Number(process.env.AI_SUB_BATCH_SIZE || 10);
+const MAX_EVIDENCE_ROWS_PER_COMPANY = Number(process.env.MAX_EVIDENCE_ROWS_PER_COMPANY || 5);
+const MAX_EVIDENCE_CHARS_PER_ROW = Number(process.env.MAX_EVIDENCE_CHARS_PER_ROW || 650);
 
 const aiProvider = process.env.AI_PROVIDER || "gemini";
 const aiApiKey = process.env.AI_API_KEY || process.env.GEMINI_API_KEY;
-const aiModel = String(process.env.AI_MODEL || "gemini-2.5-flash-lite").trim();
+const aiModel = process.env.AI_MODEL || "gemini-2.5-flash-lite";
 
 if (aiProvider !== "gemini") {
   throw new Error(`Unsupported AI_PROVIDER: ${aiProvider}. This script currently supports gemini.`);
 }
 
 if (!aiApiKey) {
-  throw new Error("Missing AI_API_KEY in .env.local");
+  throw new Error("Missing AI_API_KEY / GEMINI_API_KEY in env.");
 }
+
 function readJson(filePath) {
   if (!fs.existsSync(filePath)) return [];
   return JSON.parse(fs.readFileSync(filePath, "utf-8"));
 }
 
 function cleanText(value = "") {
-  return String(value)
+  return String(value ?? "")
     .replace(/[�]/g, "")
     .replace(/\r?\n|\r/g, " ")
     .replace(/\s+/g, " ")
@@ -53,12 +55,30 @@ function companyKeyFromName(name = "") {
 }
 
 function getCompanyName(row) {
-  return cleanText(row.rawName || row.companyName || row.company || row.name || row.title || "");
+  return cleanText(
+    row.rawName ||
+      row.cleanCompanyName ||
+      row.companyName ||
+      row.company ||
+      row.name ||
+      row.organization ||
+      row.organisation ||
+      row.employer ||
+      row.title ||
+      ""
+  );
 }
 
-function toNumber(value, fallback = 0) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
+function toNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(String(value).replace("%", "").trim());
+  return Number.isFinite(number) ? number : null;
+}
+
+function clampScore(value) {
+  const number = toNumber(value);
+  if (number === null) return null;
+  return Math.max(0, Math.min(100, Math.round(number)));
 }
 
 function unique(values) {
@@ -93,8 +113,7 @@ function groupCompanies(rows) {
 
   for (const row of rows) {
     const name = getCompanyName(row);
-    const key = row.companyKey || companyKeyFromName(name);
-
+    const key = cleanText(row.companyKey) || companyKeyFromName(name);
     if (!key) continue;
 
     if (!map.has(key)) {
@@ -168,10 +187,72 @@ function safeJsonParse(text) {
   throw new Error(`AI returned malformed JSON. Saved raw response to ${RAW_RESPONSE_FILE}`);
 }
 
-function clampScore(value) {
-  return Math.max(0, Math.min(100, Math.round(toNumber(value))));
+function extractLlmScore(result) {
+  const direct = clampScore(
+    result.intentScore ??
+      result.aiIntentScore ??
+      result.score ??
+      result.leadScore ??
+      result.aiScore
+  );
+
+  if (direct !== null) return { value: direct, source: "direct" };
+
+  const breakdown = result.scoreBreakdown && typeof result.scoreBreakdown === "object" ? result.scoreBreakdown : null;
+
+  if (breakdown) {
+    const parts = [
+      breakdown.icpFit,
+      breakdown.outboundNeed,
+      breakdown.growthTrigger,
+      breakdown.evidenceQuality,
+      breakdown.urgency,
+      breakdown.buyerClarity,
+      breakdown.negativePenalty,
+    ];
+
+    const numbers = parts.map(toNumber).filter((number) => number !== null);
+
+    if (numbers.length >= 4) {
+      const sum = numbers.reduce((acc, number) => acc + number, 0);
+      return {
+        value: Math.max(0, Math.min(100, Math.round(sum))),
+        source: "scoreBreakdown",
+      };
+    }
+  }
+
+  return { value: null, source: "missing" };
 }
 
+function extractConfidence(result) {
+  return clampScore(
+    result.confidence ??
+      result.aiConfidence ??
+      result.confidenceScore ??
+      result.aiConfidenceScore
+  );
+}
+
+function validateAiResult(result, inputCompany) {
+  if (!result || typeof result !== "object") return "result is not an object";
+
+  const score = extractLlmScore(result);
+  const confidence = extractConfidence(result);
+  const decision = cleanText(result.decision || result.aiDecision || result.buyingStage || result.aiBuyingStage);
+  const reasoning = cleanText(result.scoreReasoning || result.aiScoreReasoning || result.badLeadReason || result.confidenceReason);
+  const entityType = cleanText(result.entityType || result.aiEntityType);
+  const outputName = cleanText(result.cleanCompanyName || result.companyName || result.rawName || "");
+
+  if (score.value === null) return "missing numeric LLM score";
+  if (confidence === null) return "missing numeric confidence";
+  if (!decision) return "missing decision";
+  if (!entityType) return "missing entityType";
+  if (!reasoning) return "missing reasoning";
+  if (!outputName) return "missing company name";
+
+  return "";
+}
 
 function calibrateDecision({
   score,
@@ -184,8 +265,6 @@ function calibrateDecision({
   icpFit,
   buyerNeed,
   salesMotion,
-  rawDecision,
-  rawBuyingStage,
 }) {
   const entity = cleanText(entityType).toLowerCase();
   const type = cleanText(companyType).toLowerCase();
@@ -283,10 +362,22 @@ function calibrateDecision({
 }
 
 function normalizeResult(result, inputCompany) {
+  const scoreInfo = extractLlmScore(result);
+  const confidence = extractConfidence(result);
+
+  if (scoreInfo.value === null) {
+    throw new Error(`Missing LLM score for ${inputCompany.companyName}`);
+  }
+
+  if (confidence === null) {
+    throw new Error(`Missing LLM confidence for ${inputCompany.companyName}`);
+  }
+
   const signals = Array.isArray(result.signals) ? result.signals : [];
-  const scoreBreakdown = result.scoreBreakdown && typeof result.scoreBreakdown === "object"
-    ? result.scoreBreakdown
-    : {};
+  const scoreBreakdown =
+    result.scoreBreakdown && typeof result.scoreBreakdown === "object"
+      ? result.scoreBreakdown
+      : {};
 
   const normalizedSignals = signals.map((signal) => {
     if (typeof signal === "string") {
@@ -306,17 +397,15 @@ function normalizeResult(result, inputCompany) {
     };
   });
 
-  const score = clampScore(result.intentScore);
-  const confidence = clampScore(result.confidence ?? 50);
-
-  const entityType = cleanText(result.entityType || "unknown");
-  const companyType = cleanText(result.companyType || "unknown");
-  const icpFit = cleanText(result.icpFit || "low");
-  const buyerNeed = cleanText(result.buyerNeed || "unknown");
-  const salesMotion = cleanText(result.salesMotion || "unknown");
-  const isRealCompany = Boolean(result.isRealCompany);
-  const rawIsPotentialCustomer = Boolean(result.isPotentialCustomer);
-  const rawIsBadLead = Boolean(result.isBadLead);
+  const score = scoreInfo.value;
+  const entityType = cleanText(result.entityType || result.aiEntityType || "unknown");
+  const companyType = cleanText(result.companyType || result.aiCompanyType || "unknown");
+  const icpFit = cleanText(result.icpFit || result.aiIcpFit || "low");
+  const buyerNeed = cleanText(result.buyerNeed || result.aiBuyerNeed || "unknown");
+  const salesMotion = cleanText(result.salesMotion || result.aiSalesMotion || "unknown");
+  const isRealCompany = Boolean(result.isRealCompany ?? result.aiIsRealCompany);
+  const rawIsPotentialCustomer = Boolean(result.isPotentialCustomer ?? result.aiIsPotentialCustomer);
+  const rawIsBadLead = Boolean(result.isBadLead ?? result.aiIsBadLead);
 
   const calibrated = calibrateDecision({
     score,
@@ -329,8 +418,6 @@ function normalizeResult(result, inputCompany) {
     icpFit,
     buyerNeed,
     salesMotion,
-    rawDecision: result.decision,
-    rawBuyingStage: result.buyingStage,
   });
 
   return {
@@ -359,38 +446,41 @@ function normalizeResult(result, inputCompany) {
 
     aiIsPotentialCustomer: calibrated.isPotentialCustomer,
     aiIsBadLead: calibrated.isBadLead,
-    aiBadLeadReason: cleanText(result.badLeadReason || ""),
+    aiBadLeadReason: cleanText(result.badLeadReason || result.aiBadLeadReason || ""),
 
     aiIcpFit: icpFit,
     aiBuyingStage: calibrated.buyingStage,
     aiDecision: calibrated.decision,
     aiBuyerNeed: buyerNeed,
     aiSalesMotion: salesMotion,
-    aiCompanySizeGuess: cleanText(result.companySizeGuess || "unknown"),
+    aiCompanySizeGuess: cleanText(result.companySizeGuess || result.aiCompanySizeGuess || "unknown"),
 
     aiSignals: normalizedSignals.map((signal) => `${signal.type}: ${signal.evidence}`).filter(Boolean),
     aiEvidenceSignals: normalizedSignals,
 
     aiIntentScore: score,
+    aiScoreSource: scoreInfo.source,
     aiConfidence: confidence,
-    aiConfidenceReason: cleanText(result.confidenceReason || ""),
+    aiConfidenceReason: cleanText(result.confidenceReason || result.aiConfidenceReason || ""),
 
     aiScoreBreakdown: {
-      icpFit: toNumber(scoreBreakdown.icpFit),
-      outboundNeed: toNumber(scoreBreakdown.outboundNeed),
-      growthTrigger: toNumber(scoreBreakdown.growthTrigger),
-      evidenceQuality: toNumber(scoreBreakdown.evidenceQuality),
-      urgency: toNumber(scoreBreakdown.urgency),
-      buyerClarity: toNumber(scoreBreakdown.buyerClarity),
-      negativePenalty: toNumber(scoreBreakdown.negativePenalty),
+      icpFit: toNumber(scoreBreakdown.icpFit) ?? 0,
+      outboundNeed: toNumber(scoreBreakdown.outboundNeed) ?? 0,
+      growthTrigger: toNumber(scoreBreakdown.growthTrigger) ?? 0,
+      evidenceQuality: toNumber(scoreBreakdown.evidenceQuality) ?? 0,
+      urgency: toNumber(scoreBreakdown.urgency) ?? 0,
+      buyerClarity: toNumber(scoreBreakdown.buyerClarity) ?? 0,
+      negativePenalty: toNumber(scoreBreakdown.negativePenalty) ?? 0,
     },
 
-    aiScoreReasoning: cleanText(result.scoreReasoning || ""),
-    aiWhyNow: cleanText(result.whyNow || ""),
-    aiRecommendedBuyer: cleanText(result.recommendedBuyer || ""),
-    aiOutreachAngle: cleanText(result.outreachAngle || ""),
-    aiNextAction: cleanText(result.nextAction || ""),
-    aiDisqualifiers: Array.isArray(result.disqualifiers) ? result.disqualifiers.map(cleanText).filter(Boolean) : [],
+    aiScoreReasoning: cleanText(result.scoreReasoning || result.aiScoreReasoning || ""),
+    aiWhyNow: cleanText(result.whyNow || result.aiWhyNow || ""),
+    aiRecommendedBuyer: cleanText(result.recommendedBuyer || result.aiRecommendedBuyer || ""),
+    aiOutreachAngle: cleanText(result.outreachAngle || result.aiOutreachAngle || ""),
+    aiNextAction: cleanText(result.nextAction || result.aiNextAction || ""),
+    aiDisqualifiers: Array.isArray(result.disqualifiers)
+      ? result.disqualifiers.map(cleanText).filter(Boolean)
+      : [],
 
     description: inputCompany.evidenceRows
       .map((row) => row.evidenceText)
@@ -413,9 +503,11 @@ function csvEscape(value) {
 
 function writeCsv(filePath, rows) {
   const preferredKeys = [
+    "aiEnrichedSeq",
     "companyKey",
     "rawName",
     "aiIntentScore",
+    "aiScoreSource",
     "aiConfidence",
     "aiDecision",
     "aiBuyingStage",
@@ -454,26 +546,39 @@ function writeCsv(filePath, rows) {
 
 function buildPrompt(companies) {
   return `
-You are an AI sales intelligence analyst for a company that sells outbound sales support, appointment-setting, SDR support, lead generation, and pipeline generation services.
+You are an AI sales intelligence analyst for outbound sales support, appointment-setting, SDR support, lead generation, and pipeline generation services.
 
-Your job is to analyze noisy source evidence and decide whether each entity is a real potential buyer company.
+Return exactly one valid JSON object for every input company. Do not omit any company. Return ONLY a JSON array.
 
-IMPORTANT:
-- Return exactly one JSON object for every input companyKey.
-- Do not omit any input companyKey.
-- Do not add companies that are not in the input.
-- Do not make up facts not supported by evidence.
-- If the entity is an event label, agenda page, role title, generic page, job board, or not a real buyer company, mark it clearly.
-- Hard rules should not decide quality; you should reason from evidence.
+Every object MUST include all fields below. If a company is bad/not relevant, still give a numeric intentScore and confidence. A true score of 0 is allowed only when the entity is trash/not a real buyer company, and you must explain why.
 
-For each company:
-1. Resolve whether it is a real company/entity.
-2. Clean the company name.
-3. Extract evidence-backed buying signals.
-4. Decide ICP fit for outbound sales / appointment-setting services.
-5. Decide whether the company likely needs pipeline generation or customer acquisition support.
-6. Score using the rubric below.
-7. Provide decision, confidence, why-now, buyer, outreach angle, and next action.
+Required fields for every object:
+- companyKey: exactly the same input companyKey
+- companyName
+- cleanCompanyName
+- entityType: buyer_company, vendor_or_agency, job_board_or_staffing, event_or_conference_label, person_or_role, unknown
+- isRealCompany: boolean
+- companyType: b2b_saas, b2b_software, ecommerce, fintech, healthcare, agency, recruiting_staffing, consumer, nonprofit, enterprise, local_services, unknown
+- isPotentialCustomer: boolean
+- isBadLead: boolean
+- badLeadReason: string
+- icpFit: high, medium, low, not_fit
+- buyingStage: high_intent, medium_intent, low_intent, research_more, not_relevant
+- decision: hot_lead, warm_lead, nurture, research_more, not_relevant, trash
+- buyerNeed: pipeline_generation, appointment_setting, outbound_sales, customer_acquisition, partnerships, fundraising, none, unknown
+- salesMotion: b2b_outbound, b2b_inbound, partner_channel, b2c, marketplace, nonprofit_fundraising, unknown
+- companySizeGuess: startup, smb, mid_market, enterprise, unknown
+- signals: array of { type, strength, evidence, sourceName }
+- intentScore: integer 0-100
+- confidence: integer 0-100
+- confidenceReason: string
+- scoreBreakdown: { icpFit, outboundNeed, growthTrigger, evidenceQuality, urgency, buyerClarity, negativePenalty }
+- scoreReasoning: string
+- whyNow: string
+- recommendedBuyer: string
+- outreachAngle: string
+- nextAction: string
+- disqualifiers: array
 
 Score rubric:
 - icpFit: 0-25
@@ -485,90 +590,18 @@ Score rubric:
 - negativePenalty: 0 to -40
 Final intentScore = sum, clamped 0-100.
 
-Confidence is separate from intentScore:
-- confidence 80-100: strong direct evidence
-- confidence 50-79: useful but partial evidence
-- confidence 20-49: weak evidence / needs research
-- confidence 0-19: likely bad or unclear entity
-
 Decision calibration:
 - hot_lead requires intentScore >= 85, confidence >= 70, clear buyer need, and high/medium ICP fit.
-- warm_lead is usually intentScore 70-84 with useful evidence.
-- nurture is usually intentScore 50-69.
+- warm_lead is usually 70-84.
+- nurture is usually 50-69.
 - research_more is weak or incomplete evidence.
 - not_relevant is a real entity but not a good buyer.
 - trash is not a real buyer company or obvious garbage.
-
-Be strict:
-- Do not label a company hot_lead only because it is hiring one generic role.
-- Agencies, staffing firms, recruiting firms, job boards, and marketing vendors are usually not_relevant or vendor_or_agency unless there is direct evidence they need outbound appointment-setting help.
-- B2C brands without B2B sales motion should not become hot_lead.
-- Large enterprises can be good leads only if there is clear team-level GTM expansion signal.
-
-Valid values:
-entityType: buyer_company, vendor_or_agency, job_board_or_staffing, event_or_conference_label, person_or_role, unknown
-companyType: b2b_saas, b2b_software, ecommerce, fintech, healthcare, agency, recruiting_staffing, consumer, nonprofit, enterprise, local_services, unknown
-icpFit: high, medium, low, not_fit
-buyingStage: high_intent, medium_intent, low_intent, research_more, not_relevant
-decision: hot_lead, warm_lead, nurture, research_more, not_relevant, trash
-buyerNeed: pipeline_generation, appointment_setting, outbound_sales, customer_acquisition, partnerships, fundraising, none, unknown
-salesMotion: b2b_outbound, b2b_inbound, partner_channel, b2c, marketplace, nonprofit_fundraising, unknown
-companySizeGuess: startup, smb, mid_market, enterprise, unknown
-
-Return ONLY valid JSON array. No markdown. No comments.
-
-Output object shape:
-[
-  {
-    "companyKey": "same input key",
-    "companyName": "input company name",
-    "cleanCompanyName": "cleaned company name",
-    "entityType": "buyer_company",
-    "isRealCompany": true,
-    "companyType": "b2b_saas",
-    "isPotentialCustomer": true,
-    "isBadLead": false,
-    "badLeadReason": "",
-    "icpFit": "high",
-    "buyingStage": "high_intent",
-    "decision": "hot_lead",
-    "buyerNeed": "pipeline_generation",
-    "salesMotion": "b2b_outbound",
-    "companySizeGuess": "mid_market",
-    "signals": [
-      {
-        "type": "gtm_hiring",
-        "strength": "high",
-        "evidence": "Hiring Enterprise Account Executive",
-        "sourceName": "RemoteOK"
-      }
-    ],
-    "intentScore": 88,
-    "confidence": 82,
-    "confidenceReason": "Direct GTM hiring evidence from source rows.",
-    "scoreBreakdown": {
-      "icpFit": 22,
-      "outboundNeed": 23,
-      "growthTrigger": 18,
-      "evidenceQuality": 12,
-      "urgency": 8,
-      "buyerClarity": 5,
-      "negativePenalty": 0
-    },
-    "scoreReasoning": "Explain score based on evidence.",
-    "whyNow": "Why outreach is timely.",
-    "recommendedBuyer": "VP Sales, Head of Growth",
-    "outreachAngle": "Personalized outbound angle.",
-    "nextAction": "Find VP Sales and test appointment-setting pitch.",
-    "disqualifiers": []
-  }
-]
 
 Input companies:
 ${JSON.stringify(companies, null, 2)}
 `;
 }
-
 
 function companyPromptPayload(company) {
   return {
@@ -586,22 +619,17 @@ function companyPromptPayload(company) {
   };
 }
 
-async function callGeminiRest(prompt) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(aiModel)}:generateContent`;
+async function requestAiResultsForCompanies(companies) {
+  const prompt = buildPrompt(companies.map(companyPromptPayload));
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    aiModel
+  )}:generateContent?key=${encodeURIComponent(aiApiKey)}`;
 
   const response = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": aiApiKey,
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: prompt }],
-        },
-      ],
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
       generationConfig: {
         responseMimeType: "application/json",
         temperature: 0.1,
@@ -612,36 +640,18 @@ async function callGeminiRest(prompt) {
   const bodyText = await response.text();
 
   if (!response.ok) {
-    fs.writeFileSync(RAW_RESPONSE_FILE, bodyText);
-    throw new Error(`Gemini REST request failed ${response.status}: ${bodyText.slice(0, 1000)}`);
+    throw new Error(`Gemini API failed ${response.status}: ${bodyText.slice(0, 1200)}`);
   }
 
-  let body;
-  try {
-    body = JSON.parse(bodyText);
-  } catch {
-    fs.writeFileSync(RAW_RESPONSE_FILE, bodyText);
-    throw new Error(`Gemini REST returned non-JSON response. Saved raw response to ${RAW_RESPONSE_FILE}`);
-  }
-
+  const body = JSON.parse(bodyText);
   const text =
-    body?.candidates?.[0]?.content?.parts
-      ?.map((part) => part.text || "")
-      .join("") || "";
+    body.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") ||
+    "";
 
-  if (!text.trim()) {
-    fs.writeFileSync(RAW_RESPONSE_FILE, bodyText);
-    throw new Error(`Gemini REST returned empty text. Saved raw response to ${RAW_RESPONSE_FILE}`);
-  }
-
-  return text;
-}
-
-async function requestAiResultsForCompanies(companies) {
-  const prompt = buildPrompt(companies.map(companyPromptPayload));
-  const responseText = await callGeminiRest(prompt);
-  const parsed = safeJsonParse(responseText || "[]");
-  const resultArray = Array.isArray(parsed) ? parsed : parsed.results || parsed.companies || [];
+  const parsed = safeJsonParse(text || "[]");
+  const resultArray = Array.isArray(parsed)
+    ? parsed
+    : parsed.results || parsed.companies || [];
 
   if (!Array.isArray(resultArray)) {
     throw new Error("AI response was not a JSON array.");
@@ -650,68 +660,9 @@ async function requestAiResultsForCompanies(companies) {
   return resultArray;
 }
 
-async function enrichBatchWithRetry(companies, depth = 0) {
-  const prefix = "  ".repeat(depth);
-
-  try {
-    console.log(`${prefix}AI request for ${companies.length} companies...`);
-    const results = await requestAiResultsForCompanies(companies);
-    console.log(`${prefix}AI request succeeded for ${companies.length} companies.`);
-    return results;
-  } catch (error) {
-    console.warn(`${prefix}AI request failed for ${companies.length} companies: ${error.message}`);
-
-    if (companies.length <= 1) {
-      const failedFile = dataPath("ai-company-failed-single.json");
-      fs.writeFileSync(failedFile, JSON.stringify(companies[0], null, 2));
-      console.warn(`${prefix}Skipping one company after repeated AI parse failure: ${companies[0]?.companyName}`);
-      console.warn(`${prefix}Saved failed company to ${failedFile}`);
-      return [];
-    }
-
-    const mid = Math.ceil(companies.length / 2);
-    const left = companies.slice(0, mid);
-    const right = companies.slice(mid);
-
-    console.warn(`${prefix}Retrying internally as ${left.length} + ${right.length} companies...`);
-
-    const leftResults = await enrichBatchWithRetry(left, depth + 1);
-    const rightResults = await enrichBatchWithRetry(right, depth + 1);
-
-    return [...leftResults, ...rightResults];
-  }
-}
-
-async function run() {
-  const sourceRows = readJson(INPUT_JSON);
-  const existingRows = readJson(OUTPUT_JSON);
-
-  const existingByKey = new Map(existingRows.map((row) => [row.companyKey, row]));
-  const companies = groupCompanies(sourceRows);
-
-  const remainingCompanies = companies.filter((company) => !existingByKey.has(company.companyKey));
-  const batch = remainingCompanies.slice(0, BATCH_SIZE);
-
-  console.log("Company-level AI enrichment v2");
-  console.log("--------------------------------");
-  console.log(`Provider: ${aiProvider}`);
-  console.log(`Model: ${aiModel}`);
-  console.log(`Pre-clean rows: ${sourceRows.length}`);
-  console.log(`Unique companies: ${companies.length}`);
-  console.log(`Already AI-enriched companies: ${existingRows.length}`);
-  console.log(`Remaining companies: ${remainingCompanies.length}`);
-  console.log(`Batch size this run: ${batch.length}`);
-
-  if (batch.length === 0) {
-    console.log("Nothing to enrich.");
-    return;
-  }
-
-  const resultArray = await enrichBatchWithRetry(batch);
-
-  const resultArrayRaw = Array.isArray(resultArray) ? resultArray : [];
-
+function matchResultsToCompanies(resultArrayRaw, companies) {
   const resultsByKey = new Map();
+
   resultArrayRaw.forEach((result, index) => {
     if (result && result.companyKey) {
       resultsByKey.set(String(result.companyKey), { result, index });
@@ -719,95 +670,183 @@ async function run() {
   });
 
   const usedResultIndexes = new Set();
+  const matched = [];
 
-  function findResultForCompany(inputCompany, index) {
+  for (let index = 0; index < companies.length; index += 1) {
+    const inputCompany = companies[index];
+    let selected = null;
+    let matchMethod = "none";
+
     const exact = resultsByKey.get(inputCompany.companyKey);
     if (exact && !usedResultIndexes.has(exact.index)) {
+      selected = exact.result;
       usedResultIndexes.add(exact.index);
-      return { result: exact.result, matchMethod: "companyKey" };
+      matchMethod = "companyKey";
     }
 
-    const inputName = normalizeCompanyName(inputCompany.companyName);
+    if (!selected) {
+      const inputName = normalizeCompanyName(inputCompany.companyName);
 
-    for (let i = 0; i < resultArrayRaw.length; i += 1) {
-      if (usedResultIndexes.has(i)) continue;
+      for (let i = 0; i < resultArrayRaw.length; i += 1) {
+        if (usedResultIndexes.has(i)) continue;
 
-      const candidate = resultArrayRaw[i];
-      if (!candidate || typeof candidate !== "object") continue;
+        const candidate = resultArrayRaw[i];
+        if (!candidate || typeof candidate !== "object") continue;
 
-      const candidateName = normalizeCompanyName(
-        candidate.cleanCompanyName ||
-          candidate.companyName ||
-          candidate.rawName ||
-          ""
-      );
+        const candidateName = normalizeCompanyName(
+          candidate.cleanCompanyName || candidate.companyName || candidate.rawName || ""
+        );
 
-      if (candidateName && inputName && candidateName === inputName) {
-        usedResultIndexes.add(i);
-        return { result: candidate, matchMethod: "companyName" };
+        if (candidateName && inputName && candidateName === inputName) {
+          selected = candidate;
+          usedResultIndexes.add(i);
+          matchMethod = "companyName";
+          break;
+        }
       }
     }
 
     if (
+      !selected &&
       resultArrayRaw[index] &&
       typeof resultArrayRaw[index] === "object" &&
       !usedResultIndexes.has(index)
     ) {
+      selected = resultArrayRaw[index];
       usedResultIndexes.add(index);
-      return { result: resultArrayRaw[index], matchMethod: "position" };
+      matchMethod = "position";
     }
 
-    return null;
+    if (!selected) {
+      matched.push({ inputCompany, result: null, error: "missing result" });
+      continue;
+    }
+
+    const repaired = {
+      ...selected,
+      companyKey: inputCompany.companyKey,
+      companyName: selected.companyName || inputCompany.companyName,
+      cleanCompanyName:
+        selected.cleanCompanyName || selected.companyName || inputCompany.companyName,
+    };
+
+    const validationError = validateAiResult(repaired, inputCompany);
+    matched.push({ inputCompany, result: repaired, error: validationError, matchMethod });
+  }
+
+  return matched;
+}
+
+async function enrichChunkWithRetry(companies, depth = 0) {
+  const prefix = "  ".repeat(depth);
+
+  try {
+    console.log(`${prefix}Gemini request for ${companies.length} companies...`);
+    const results = await requestAiResultsForCompanies(companies);
+    const matched = matchResultsToCompanies(results, companies);
+    const invalid = matched.filter((item) => item.error);
+
+    if (invalid.length > 0) {
+      throw new Error(
+        `Invalid AI results: ${invalid
+          .map((item) => `${item.inputCompany.companyName}: ${item.error}`)
+          .join("; ")}`
+      );
+    }
+
+    console.log(`${prefix}Gemini request succeeded for ${companies.length} companies.`);
+    return matched.map((item) => item.result);
+  } catch (error) {
+    console.warn(`${prefix}Gemini request failed for ${companies.length} companies: ${error.message}`);
+
+    if (companies.length <= 1) {
+      throw new Error(
+        `Single company AI review failed for ${companies[0]?.companyName}: ${error.message}`
+      );
+    }
+
+    const mid = Math.ceil(companies.length / 2);
+    const left = companies.slice(0, mid);
+    const right = companies.slice(mid);
+
+    console.warn(`${prefix}Retrying as ${left.length} + ${right.length} companies...`);
+
+    const leftResults = await enrichChunkWithRetry(left, depth + 1);
+    const rightResults = await enrichChunkWithRetry(right, depth + 1);
+
+    return [...leftResults, ...rightResults];
+  }
+}
+
+async function run() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+
+  const sourceRows = readJson(INPUT_JSON);
+  const existingRows = readJson(OUTPUT_JSON);
+
+  const existingByKey = new Map(existingRows.map((row) => [row.companyKey, row]));
+  const companies = groupCompanies(sourceRows);
+  const remainingCompanies = companies.filter((company) => !existingByKey.has(company.companyKey));
+  const batch = remainingCompanies.slice(0, BATCH_SIZE);
+
+  console.log("Company-level AI enrichment - strict microbatch");
+  console.log("---------------------------------------------");
+  console.log(`Provider: ${aiProvider}`);
+  console.log(`Model: ${aiModel}`);
+  console.log(`Pre-clean rows: ${sourceRows.length}`);
+  console.log(`Unique companies: ${companies.length}`);
+  console.log(`Already AI-enriched companies: ${existingRows.length}`);
+  console.log(`Remaining companies: ${remainingCompanies.length}`);
+  console.log(`Batch size this run: ${batch.length}`);
+  console.log(`Gemini sub-batch size: ${AI_SUB_BATCH_SIZE}`);
+
+  if (batch.length === 0) {
+    console.log("Nothing to enrich.");
+    return;
+  }
+
+  const resultArray = [];
+
+  for (let i = 0; i < batch.length; i += AI_SUB_BATCH_SIZE) {
+    const chunk = batch.slice(i, i + AI_SUB_BATCH_SIZE);
+    console.log(`\nReviewing companies ${i + 1}-${i + chunk.length} of ${batch.length}`);
+    const chunkResults = await enrichChunkWithRetry(chunk);
+    resultArray.push(...chunkResults);
   }
 
   const newRows = [];
 
-  for (let index = 0; index < batch.length; index += 1) {
-    const inputCompany = batch[index];
-    const matched = findResultForCompany(inputCompany, index);
+  for (const inputCompany of batch) {
+    const result = resultArray.find((item) => item.companyKey === inputCompany.companyKey);
 
-    if (!matched) {
-      console.log(`Missing AI result for: ${inputCompany.companyName}`);
-      continue;
-    }
-
-    const result = {
-      ...matched.result,
-      companyKey: inputCompany.companyKey,
-      companyName: matched.result.companyName || inputCompany.companyName,
-      cleanCompanyName:
-        matched.result.cleanCompanyName ||
-        matched.result.companyName ||
-        inputCompany.companyName,
-    };
-
-    if (matched.matchMethod !== "companyKey") {
-      console.warn(
-        `AI result key repaired by ${matched.matchMethod} for: ${inputCompany.companyName}`
-      );
+    if (!result) {
+      throw new Error(`Missing AI result after strict review for: ${inputCompany.companyName}`);
     }
 
     const normalized = normalizeResult(result, inputCompany);
     newRows.push(normalized);
 
     console.log(
-      `${normalized.rawName} → ${normalized.aiIntentScore} | ${normalized.aiDecision} | ${normalized.aiConfidence}% confidence | ${normalized.aiIcpFit} | mentions: ${normalized.mentionCount}`
-    );
-  }
-
-  if (newRows.length === 0) {
-    throw new Error(
-      `AI returned ${resultArrayRaw.length} result objects, but none could be matched to the requested batch. Check ${RAW_RESPONSE_FILE}`
+      `${normalized.rawName} -> ${normalized.aiIntentScore} | ${normalized.aiDecision} | ${normalized.aiConfidence}% confidence | ${normalized.aiIcpFit} | scoreSource: ${normalized.aiScoreSource}`
     );
   }
 
   const mergedByKey = new Map(existingRows.map((row) => [row.companyKey, row]));
-  for (const row of newRows) mergedByKey.set(row.companyKey, row);
+  const existingMaxSeq = existingRows.reduce(
+    (max, row) => Math.max(max, Number(row.aiEnrichedSeq || 0)),
+    0
+  );
 
-  const outputRows = Array.from(mergedByKey.values()).map((row, index) => ({
-    ...row,
-    aiEnrichedSeq: row.aiEnrichedSeq || index + 1,
-  }));
+  newRows.forEach((row, index) => {
+    mergedByKey.set(row.companyKey, {
+      ...row,
+      aiEnrichedSeq: existingMaxSeq + index + 1,
+    });
+  });
+
+  const outputRows = Array.from(mergedByKey.values()).sort(
+    (a, b) => Number(a.aiEnrichedSeq || 0) - Number(b.aiEnrichedSeq || 0)
+  );
 
   fs.writeFileSync(OUTPUT_JSON, JSON.stringify(outputRows, null, 2));
   writeCsv(OUTPUT_CSV, outputRows);
@@ -817,6 +856,7 @@ async function run() {
   console.log("------------------------------------");
   console.log(`New companies enriched: ${newRows.length}`);
   console.log(`Total AI-enriched companies saved: ${outputRows.length}`);
+  console.log(`Zero-score rows in new batch: ${newRows.filter((row) => row.aiIntentScore === 0).length}`);
   console.log(`Wrote ${OUTPUT_JSON}`);
   console.log(`Wrote ${OUTPUT_CSV}`);
 }

@@ -235,13 +235,12 @@ const dashboardRows = [...bestByKey.entries()].map(([companyKey, row]) => {
 });
 
 dashboardRows.sort((a, b) => {
-  const scoreDiff = Number(b.score || 0) - Number(a.score || 0);
-  if (scoreDiff !== 0) return scoreDiff;
+  const seqA = Number(a.aiEnrichedSeq || 0);
+  const seqB = Number(b.aiEnrichedSeq || 0);
 
-  const confidenceDiff = Number(b.confidence || 0) - Number(a.confidence || 0);
-  if (confidenceDiff !== 0) return confidenceDiff;
+  if (seqA !== seqB) return seqA - seqB;
 
-  return Date.parse(b.capturedAt || "") - Date.parse(a.capturedAt || "");
+  return String(a.companyName || "").localeCompare(String(b.companyName || ""));
 });
 
 await writeFile(OUT_JSON, JSON.stringify(dashboardRows, null, 2));
