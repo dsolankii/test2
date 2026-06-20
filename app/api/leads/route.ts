@@ -57,27 +57,18 @@ async function readJsonArray(filePath: string) {
 }
 
 async function readLeads() {
-  const { dashboardPath, enrichedPath } = makePaths();
-
-  const dashboardRows = await readJsonArray(dashboardPath);
-  if (dashboardRows.length > 0) return dashboardRows;
-
-  return await readJsonArray(enrichedPath);
+  const { dashboardPath } = makePaths();
+  return await readJsonArray(dashboardPath);
 }
 
 async function getDataVersion() {
-  const { dashboardPath, enrichedPath } = makePaths();
+  const { dashboardPath } = makePaths();
 
   try {
     const info = await stat(dashboardPath);
     return info.mtimeMs;
   } catch {
-    try {
-      const info = await stat(enrichedPath);
-      return info.mtimeMs;
-    } catch {
-      return Date.now();
-    }
+    return Date.now();
   }
 }
 

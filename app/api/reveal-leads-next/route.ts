@@ -13,7 +13,6 @@ function makePaths() {
   return {
     statePath: dataPath("leadgrid-visible-state.json"),
     dashboardPath: dataPath("company-dashboard-leads.json"),
-    enrichedPath: dataPath("ai-enriched-company-leads.json"),
   };
 }
 
@@ -28,12 +27,8 @@ async function readJsonArray(filePath: string) {
 }
 
 async function readTotalLeads() {
-  const { dashboardPath, enrichedPath } = makePaths();
-
-  const dashboardRows = await readJsonArray(dashboardPath);
-  if (dashboardRows.length > 0) return dashboardRows.length;
-
-  return (await readJsonArray(enrichedPath)).length;
+  const { dashboardPath } = makePaths();
+  return (await readJsonArray(dashboardPath)).length;
 }
 
 async function readState() {
@@ -63,28 +58,6 @@ async function readState() {
   }
 }
 
-async function buildMoreIfNeeded(state: { maxUnlockedPage: number; pageSize: number }) {
-  let totalLeads = await readTotalLeads();
-  let totalPages = Math.max(Math.ceil(totalLeads / state.pageSize), 1);
-
-  const needsMoreBuiltRows = state.maxUnlockedPage >= totalPages - 1;
-
-  if (needsMoreBuiltRows) {
-    await runLocalScript("scripts/preclean-real-sources.mjs", 10 * 60 * 1000);
-    await runLocalScript("scripts/enrich-company-batch-ai.mjs", 25 * 60 * 1000);
-    await runLocalScript("scripts/build-company-dashboard-dataset.mjs", 10 * 60 * 1000);
-
-    totalLeads = await readTotalLeads();
-    totalPages = Math.max(Math.ceil(totalLeads / state.pageSize), 1);
-  }
-
-  return {
-    totalLeads,
-    totalPages,
-    builtMore: needsMoreBuiltRows,
-  };
-}
-
 export async function POST(request: Request) {
   applyWorkspaceToRequest(request);
 
@@ -96,18 +69,36 @@ export async function POST(request: Request) {
     const { statePath } = makePaths();
     await mkdir(path.dirname(statePath), { recursive: true });
 
+    const totalLeads = await readTotalLeads();
     const state = await readState();
-    const built = await buildMoreIfNeeded(state);
+    const totalPages = Math.max(Math.ceil(totalLeads / state.pageSize), 1);
+    const lastPreparedPage = Math.max(totalPages - 1, 0);
 
-    const maxExistingPage = Math.max(built.totalPages - 1, 0);
-    const nextUnlockedPage = Math.min(
-      Math.max(state.maxUnlockedPage + 1, 0),
-      maxExistingPage
-    );
+    const nextPage = state.maxUnlockedPage + 1;
+
+    if (nextPage > lastPreparedPage) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "Next 50 is not prepared yet. Wait for background LLM review to finish, or run Review from Console.",
+          totalLeads,
+          totalPages,
+          currentPage: state.currentPage,
+          maxUnlockedPage: state.maxUnlockedPage,
+        },
+        {
+          status: 409,
+          headers: {
+            "Cache-Control": "no-store",
+          },
+        }
+      );
+    }
 
     const nextState = {
-      currentPage: nextUnlockedPage,
-      maxUnlockedPage: nextUnlockedPage,
+      currentPage: nextPage,
+      maxUnlockedPage: nextPage,
       pageSize: state.pageSize,
     };
 
@@ -117,20 +108,20 @@ export async function POST(request: Request) {
       await runLocalScript("scripts/blob-push.mjs", 60 * 1000);
     }
 
-    const upcomingPage = Math.min(nextUnlockedPage + 1, maxExistingPage);
-    const hasNext = nextUnlockedPage < maxExistingPage;
+    const upcomingPage = Math.min(nextPage + 1, lastPreparedPage);
+    const hasNext = nextPage < lastPreparedPage;
 
     return NextResponse.json(
       {
         ok: true,
-        currentPage: nextUnlockedPage,
-        maxUnlockedPage: nextUnlockedPage,
-        totalPages: built.totalPages,
-        reviewedMore: built.builtMore,
+        currentPage: nextPage,
+        maxUnlockedPage: nextPage,
+        totalPages,
+        reviewedMore: false,
         canUnlockNext: hasNext,
         nextStart: hasNext ? upcomingPage * state.pageSize + 1 : 0,
         nextEnd: hasNext
-          ? Math.min((upcomingPage + 1) * state.pageSize, built.totalLeads)
+          ? Math.min((upcomingPage + 1) * state.pageSize, totalLeads)
           : 0,
       },
       {

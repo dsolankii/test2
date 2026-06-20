@@ -28,12 +28,8 @@ async function readJsonArray(filePath: string) {
 }
 
 async function readTotalLeads() {
-  const { dashboardPath, enrichedPath } = makePaths();
-
-  const dashboardRows = await readJsonArray(dashboardPath);
-  if (dashboardRows.length > 0) return dashboardRows.length;
-
-  return (await readJsonArray(enrichedPath)).length;
+  const { dashboardPath } = makePaths();
+  return (await readJsonArray(dashboardPath)).length;
 }
 
 async function readState() {

@@ -42,17 +42,16 @@ function getCompanyName(lead: Lead) {
 
 function makePaths() {
   return {
-    STATE_PATH: dataPath("leadgrid-visible-state.json"),
-    LEADS_PATH: dataPath("company-dashboard-leads.json"),
-    FALLBACK_LEADS_PATH: dataPath("ai-enriched-company-leads.json"),
+    statePath: dataPath("leadgrid-visible-state.json"),
+    dashboardPath: dataPath("company-dashboard-leads.json"),
   };
 }
 
 async function readState() {
-  const { STATE_PATH } = makePaths();
+  const { statePath } = makePaths();
 
   try {
-    const raw = await readFile(STATE_PATH, "utf8");
+    const raw = await readFile(statePath, "utf8");
     const state = JSON.parse(raw);
 
     return {
@@ -82,10 +81,8 @@ async function readJsonArray(filePath: string) {
 }
 
 async function readLeads() {
-  const { LEADS_PATH, FALLBACK_LEADS_PATH } = makePaths();
-  const dashboardRows = await readJsonArray(LEADS_PATH);
-  if (dashboardRows.length > 0) return dashboardRows;
-  return await readJsonArray(FALLBACK_LEADS_PATH);
+  const { dashboardPath } = makePaths();
+  return await readJsonArray(dashboardPath);
 }
 
 export async function GET(request: Request) {

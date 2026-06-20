@@ -238,115 +238,38 @@ function inferSignalCategory(lead: Lead) {
 }
 
 function getIcpFit(lead: Lead) {
-  const existing = getExistingText(lead, [
-    "aiIcpFit",
-    "icpFit",
-    "aiIcpReason",
-    "icpReason",
-    "aiBuyerNeed",
-    "buyerNeed",
-    "need",
-  ]);
-
-  const company = getCompanyName(lead);
-  const category = inferSignalCategory(lead);
-
-  if (existing && !isWeakCopy(existing, company)) {
-    return sentence(existing);
-  }
-
-  if (category === "hiring") {
-    return `${company} may fit because hiring or team-growth signals often create pressure to build repeatable pipeline, recruit revenue roles, or improve outbound execution.`;
-  }
-
-  if (category === "event") {
-    return `${company} may fit because event, sponsor, or exhibitor activity usually means the team is investing in visibility, partnerships, and new pipeline creation.`;
-  }
-
-  if (category === "launch") {
-    return `${company} may fit because launch, startup, or product activity can create a near-term need for market feedback, qualified conversations, and early customer pipeline.`;
-  }
-
-  return `${company} may fit if the current public signal connects to revenue growth, hiring, market expansion, or outbound pipeline needs.`;
+  return sentence(
+    getExistingText(lead, [
+      "aiIcpFit",
+      "icpFit",
+    ])
+  );
 }
+
 
 function getWhyNow(lead: Lead) {
-  const existing = getExistingText(lead, [
-    "aiWhyNow",
-    "whyNow",
-    "reason",
-    "aiReasoning",
-    "why_now",
-  ]);
-
-  const company = getCompanyName(lead);
-  const sourceName = getSourceName(lead);
-  const signal = getSignalText(lead);
-  const category = inferSignalCategory(lead);
-
-  if (existing && !isWeakCopy(existing, company)) {
-    return sentence(existing);
-  }
-
-  if (category === "hiring") {
-    return `${company} is showing a fresh hiring or team-growth signal from ${sourceName}. That is a timely reason to reach out because companies adding roles often need more predictable lead generation, appointment-setting, or sales pipeline support.`;
-  }
-
-  if (category === "event") {
-    return `${company} is visible in ${sourceName}, which suggests active GTM investment rather than a cold static account. Reference that event signal and connect it to pipeline, meetings, or partner/customer acquisition.`;
-  }
-
-  if (category === "launch") {
-    return `${company} has a recent launch/startup signal from ${sourceName}. That creates a timely outreach angle around turning attention into qualified conversations, demos, or early customer pipeline.`;
-  }
-
-  if (signal) {
-    return `${company} has a recent public signal from ${sourceName}: ${sentence(signal)} Use that specific trigger as the reason for outreach instead of sending a generic cold message.`;
-  }
-
-  return `${company} has a recent public activity signal from ${sourceName}. Use this as a timely reason to start a personalized outbound conversation now.`;
+  return sentence(
+    getExistingText(lead, [
+      "aiWhyNow",
+      "whyNow",
+      "why_now",
+    ])
+  );
 }
+
 
 function getNextAction(lead: Lead) {
-  const existing = getExistingText(lead, [
-    "aiNextAction",
-    "nextAction",
-    "recommendedAction",
-    "action",
-    "next_action",
-  ]);
-
-  const company = getCompanyName(lead);
-  const sourceName = getSourceName(lead);
-  const score = getScore(lead);
-  const category = inferSignalCategory(lead);
-
-  if (existing && !isWeakCopy(existing, company)) {
-    return sentence(existing);
-  }
-
-  if (category === "hiring") {
-    return `Find the revenue, growth, or operations leader at ${company}. Open with the hiring signal from ${sourceName}, then ask if they are trying to turn new headcount into more qualified meetings or pipeline.`;
-  }
-
-  if (category === "event") {
-    return `Reference ${company}'s presence in ${sourceName}. Ask the partnerships, marketing, or sales leader whether they want help converting that event visibility into booked conversations before and after the event.`;
-  }
-
-  if (category === "launch") {
-    return `Reference ${company}'s recent launch/startup signal. Ask the founder or GTM lead if they are prioritizing early pipeline, customer discovery, or demo booking this month.`;
-  }
-
-  if (score >= 85) {
-    return `Prioritize ${company} for same-day outreach. Use the source signal as the first line, then ask a direct question about pipeline or booked meetings.`;
-  }
-
-  if (score >= 70) {
-    return `Research the likely buyer at ${company}, then send a warm outbound message tied to the ${sourceName} signal.`;
-  }
-
-  return `Manually review ${company}'s website and buyer team, then decide whether the ${sourceName} signal is strong enough for outreach or nurture.`;
+  return sentence(
+    getExistingText(lead, [
+      "aiNextAction",
+      "nextAction",
+      "recommendedAction",
+      "action",
+      "next_action",
+    ])
+  );
 }
+
 
 export default function LeadsPage() {
   const [darkMode, setDarkMode] = useState(false);
