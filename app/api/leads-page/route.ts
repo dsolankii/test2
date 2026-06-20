@@ -26,11 +26,6 @@ async function readJsonArray(filePath: string) {
   }
 }
 
-async function readTotalLeads() {
-  const { dashboardPath } = makePaths();
-  return (await readJsonArray(dashboardPath)).length;
-}
-
 async function readState() {
   const { statePath } = makePaths();
 
@@ -39,15 +34,9 @@ async function readState() {
     const state = JSON.parse(raw);
 
     return {
-      currentPage: Number.isFinite(Number(state.currentPage))
-        ? Number(state.currentPage)
-        : 0,
-      maxUnlockedPage: Number.isFinite(Number(state.maxUnlockedPage))
-        ? Number(state.maxUnlockedPage)
-        : 0,
-      pageSize: Number.isFinite(Number(state.pageSize))
-        ? Number(state.pageSize)
-        : 50,
+      currentPage: Number.isFinite(Number(state.currentPage)) ? Number(state.currentPage) : 0,
+      maxUnlockedPage: Number.isFinite(Number(state.maxUnlockedPage)) ? Number(state.maxUnlockedPage) : 0,
+      pageSize: Number.isFinite(Number(state.pageSize)) ? Number(state.pageSize) : 50,
     };
   } catch {
     return {
@@ -58,6 +47,12 @@ async function readState() {
   }
 }
 
+async function writeState(state: { currentPage: number; maxUnlockedPage: number; pageSize: number }) {
+  const { statePath } = makePaths();
+  await mkdir(path.dirname(statePath), { recursive: true });
+  await writeFile(statePath, JSON.stringify(state, null, 2));
+}
+
 export async function POST(request: Request) {
   applyWorkspaceToRequest(request);
 
@@ -65,18 +60,25 @@ export async function POST(request: Request) {
     await runLocalScript("scripts/blob-pull.mjs", 60 * 1000);
   }
 
-  const { statePath } = makePaths();
-  await mkdir(path.dirname(statePath), { recursive: true });
-
   const body = await request.json().catch(() => ({}));
   const direction = body.direction === "prev" ? "prev" : "next";
 
-  const totalLeads = await readTotalLeads();
+  const { dashboardPath } = makePaths();
+  const dashboardRows = await readJsonArray(dashboardPath);
   const state = await readState();
-  const totalPages = Math.max(Math.ceil(totalLeads / state.pageSize), 1);
-  const lastPreparedPage = Math.max(totalPages - 1, 0);
-  const maxUnlockedPage = Math.min(Math.max(state.maxUnlockedPage, 0), lastPreparedPage);
-  const currentPage = Math.min(Math.max(state.currentPage, 0), maxUnlockedPage);
+
+  const pageSize = state.pageSize || 50;
+  const totalAvailable = dashboardRows.length;
+  const totalPages = Math.max(Math.ceil(totalAvailable / pageSize), 1);
+  const maxUnlockedPage = Math.min(
+    Math.max(state.maxUnlockedPage, 0),
+    totalPages - 1
+  );
+
+  const currentPage = Math.min(
+    Math.max(state.currentPage, 0),
+    maxUnlockedPage
+  );
 
   const nextPage =
     direction === "next"
@@ -86,10 +88,10 @@ export async function POST(request: Request) {
   const nextState = {
     currentPage: nextPage,
     maxUnlockedPage,
-    pageSize: state.pageSize,
+    pageSize,
   };
 
-  await writeFile(statePath, JSON.stringify(nextState, null, 2));
+  await writeState(nextState);
 
   if (process.env.VERCEL) {
     await runLocalScript("scripts/blob-push.mjs", 60 * 1000);
@@ -101,6 +103,11 @@ export async function POST(request: Request) {
       currentPage: nextPage,
       maxUnlockedPage,
       totalPages,
+      totalAvailable,
+      visibleStart: totalAvailable === 0 ? 0 : nextPage * pageSize + 1,
+      visibleEnd: Math.min((nextPage + 1) * pageSize, totalAvailable),
+      canGoPrev: nextPage > 0,
+      canGoNext: nextPage < maxUnlockedPage,
     },
     {
       headers: {
