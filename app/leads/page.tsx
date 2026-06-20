@@ -20,6 +20,9 @@ type LeadMeta = {
   canUnlockNext: boolean;
   nextStart: number;
   nextEnd: number;
+  candidateTotal: number;
+  pendingReview: number;
+  reviewedPercent: number;
 };
 
 const emptyMeta: LeadMeta = {
@@ -37,6 +40,9 @@ const emptyMeta: LeadMeta = {
   canUnlockNext: false,
   nextStart: 0,
   nextEnd: 0,
+  candidateTotal: 0,
+  pendingReview: 0,
+  reviewedPercent: 0,
 };
 
 const filters = [
@@ -384,7 +390,7 @@ export default function LeadsPage() {
     if (movingPage) return;
 
     setMovingPage("unlock");
-    setPageMessage("Unlocking next 50 leads...");
+    setPageMessage("LLM is reviewing the next 50 companies. Please wait...");
 
     try {
       await postJson("/api/reveal-leads-next");
@@ -420,15 +426,14 @@ export default function LeadsPage() {
     };
   }, [leads]);
 
-  const visiblePercent =
-    leadMeta.totalAvailable > 0
-      ? Math.round((leadMeta.visibleEnd / leadMeta.totalAvailable) * 100)
-      : 0;
+  const reviewedPercent = leadMeta.reviewedPercent || 0;
 
   const scoredPercent =
     leadMeta.visibleLeadCount > 0
       ? Math.round((leadMeta.scoredVisibleLeads / leadMeta.visibleLeadCount) * 100)
       : 0;
+
+  const llmProgressPercent = movingPage === "unlock" ? 65 : reviewedPercent;
 
   return (
     <main className={pageClass}>
@@ -513,7 +518,7 @@ export default function LeadsPage() {
                   : !leadMeta.canUnlockNext
                     ? "All Done"
                     : movingPage === "unlock"
-                      ? "Loading"
+                      ? "LLM Reviewing"
                       : "Next 50"}
               </button>
 
@@ -541,9 +546,9 @@ export default function LeadsPage() {
             <div className="mt-3 grid grid-cols-2 gap-3">
               {[
                 { label: "Visible", value: leadMeta.visibleLeadCount },
-                { label: "Scored", value: leadMeta.scoredVisibleLeads },
-                { label: "Left", value: leadMeta.hiddenLeft },
-                { label: "Total", value: leadMeta.totalAvailable },
+                { label: "Reviewed", value: leadMeta.totalAvailable },
+                { label: "Pending", value: leadMeta.pendingReview },
+                { label: "Candidates", value: leadMeta.candidateTotal },
               ].map((stat) => (
                 <div key={stat.label} className="retro-box bg-white/70 p-3 text-slate-950">
                   <p className="text-[10px] font-black uppercase tracking-[0.14em]">
@@ -556,7 +561,13 @@ export default function LeadsPage() {
 
             <div className="mt-4 space-y-3">
               {[
-                { label: "Queue viewed", value: visiblePercent },
+                {
+                  label:
+                    movingPage === "unlock"
+                      ? "LLM review running"
+                      : "LLM reviewed",
+                  value: llmProgressPercent,
+                },
                 { label: "Scored on this page", value: scoredPercent },
               ].map((bar) => (
                 <div key={bar.label}>
@@ -566,7 +577,7 @@ export default function LeadsPage() {
                   </div>
                   <div className="h-2 rounded-full bg-slate-200">
                     <div
-                      className="h-2 rounded-full bg-slate-950 transition-all"
+                      className={movingPage === "unlock" && bar.label === "LLM review running" ? "h-2 animate-pulse rounded-full bg-slate-950 transition-all" : "h-2 rounded-full bg-slate-950 transition-all"}
                       style={{ width: `${Math.max(Math.min(bar.value, 100), 0)}%` }}
                     />
                   </div>

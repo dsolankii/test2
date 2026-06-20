@@ -58,6 +58,18 @@ async function readState() {
   }
 }
 
+async function prepareNextStrictLlmBatch() {
+  const preclean = await runLocalScript("scripts/preclean-real-sources.mjs", 10 * 60 * 1000);
+  const enrich = await runLocalScript("scripts/enrich-company-batch-ai.mjs", 25 * 60 * 1000);
+  const build = await runLocalScript("scripts/build-company-dashboard-dataset.mjs", 10 * 60 * 1000);
+
+  return {
+    preclean: preclean.stdout,
+    enrich: enrich.stdout,
+    build: build.stdout,
+  };
+}
+
 export async function POST(request: Request) {
   applyWorkspaceToRequest(request);
 
@@ -69,22 +81,45 @@ export async function POST(request: Request) {
     const { statePath } = makePaths();
     await mkdir(path.dirname(statePath), { recursive: true });
 
-    const totalLeads = await readTotalLeads();
     const state = await readState();
-    const totalPages = Math.max(Math.ceil(totalLeads / state.pageSize), 1);
-    const lastPreparedPage = Math.max(totalPages - 1, 0);
-    const currentMaxUnlocked = Math.min(Math.max(state.maxUnlockedPage, 0), lastPreparedPage);
+    const currentTotal = await readTotalLeads();
+    const currentLastPreparedPage = Math.max(
+      Math.ceil(currentTotal / state.pageSize) - 1,
+      0
+    );
+
+    const currentMaxUnlocked = Math.min(
+      Math.max(state.maxUnlockedPage, 0),
+      currentLastPreparedPage
+    );
+
     const nextPage = currentMaxUnlocked + 1;
+    let totalLeads = currentTotal;
+    let lastPreparedPage = currentLastPreparedPage;
+    let reviewedMore = false;
+
+    if (nextPage > lastPreparedPage) {
+      reviewedMore = true;
+      await prepareNextStrictLlmBatch();
+
+      if (process.env.VERCEL) {
+        await runLocalScript("scripts/blob-pull.mjs", 60 * 1000);
+      }
+
+      totalLeads = await readTotalLeads();
+      lastPreparedPage = Math.max(Math.ceil(totalLeads / state.pageSize) - 1, 0);
+    }
 
     if (nextPage > lastPreparedPage) {
       return NextResponse.json(
         {
           ok: false,
-          error: "Next 50 is not prepared yet. Wait for background LLM review to finish.",
+          error:
+            "LLM review finished but no new reviewed leads were produced. Check Review/Qualification logs.",
           totalLeads,
-          totalPages,
           currentPage: Math.min(state.currentPage, currentMaxUnlocked),
           maxUnlockedPage: currentMaxUnlocked,
+          reviewedMore,
         },
         {
           status: 409,
@@ -107,8 +142,9 @@ export async function POST(request: Request) {
       await runLocalScript("scripts/blob-push.mjs", 60 * 1000);
     }
 
+    const totalPages = Math.max(Math.ceil(totalLeads / state.pageSize), 1);
     const upcomingPage = Math.min(nextPage + 1, lastPreparedPage);
-    const hasNext = nextPage < lastPreparedPage;
+    const hasNextPrepared = nextPage < lastPreparedPage;
 
     return NextResponse.json(
       {
@@ -116,12 +152,12 @@ export async function POST(request: Request) {
         currentPage: nextPage,
         maxUnlockedPage: nextPage,
         totalPages,
-        reviewedMore: false,
-        canUnlockNext: hasNext,
-        nextStart: hasNext ? upcomingPage * state.pageSize + 1 : 0,
-        nextEnd: hasNext
+        reviewedMore,
+        canUnlockNext: hasNextPrepared,
+        nextStart: hasNextPrepared ? upcomingPage * state.pageSize + 1 : totalLeads + 1,
+        nextEnd: hasNextPrepared
           ? Math.min((upcomingPage + 1) * state.pageSize, totalLeads)
-          : 0,
+          : totalLeads + state.pageSize,
       },
       {
         headers: {
