@@ -134,7 +134,9 @@ export async function POST(request: Request) {
     }
 
     const nextState = {
-      currentPage: targetPage,
+      // Keep user on the current page. Next 50 only unlocks/prepares the next page.
+      // The right arrow then opens and moves the user to the prepared page.
+      currentPage: Math.min(state.currentPage, Math.max(currentMaxUnlocked, targetPage)),
       maxUnlockedPage: Math.max(currentMaxUnlocked, targetPage),
       pageSize,
     };

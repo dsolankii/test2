@@ -395,7 +395,7 @@ export default function LeadsPage() {
 
       setReviewProgress(100);
       await loadData(false);
-      setPageMessage("LLM review complete. Showing reviewed leads.");
+      setPageMessage("Next 50 is ready. Use the right arrow to open it.");
     } catch (error) {
       setPageMessage(error instanceof Error ? error.message : "Next 50 failed");
     } finally {
