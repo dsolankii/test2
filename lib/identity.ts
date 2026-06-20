@@ -43,8 +43,8 @@ export function resolveCompanies(
 
   for (const mention of rawMentions) {
     const domain = getRootDomain(mention.website);
-    const fallbackName = normalizeName(mention.rawName);
-    const key = domain || fallbackName;
+    const rawNameKey = normalizeName(mention.rawName);
+    const key = domain || rawNameKey;
 
     if (!groups.has(key)) {
       groups.set(key, []);

@@ -238,7 +238,7 @@ function inferSignalCategory(lead: Lead) {
     return "event";
   }
 
-  if (/launch|product|yc|product hunt|startup|funding|seed|series/.test(haystack)) {
+  if (/launch|product|yc|product hunt|startup|funding|raised/.test(haystack)) {
     return "launch";
   }
 
@@ -323,9 +323,9 @@ export default function LeadsPage() {
         throw new Error(leadData.error || "Failed to load leads");
       }
 
-      const nextLeads = Array.isArray(leadData.leads) ? leadData.leads : [];
       const nextMeta = leadData.meta || emptyMeta;
-
+      const pageSize = Number(nextMeta.pageSize || 50);
+      const nextLeads = Array.isArray(leadData.leads) ? leadData.leads.slice(0, pageSize) : [];
       setLeads(nextLeads);
       setLeadMeta(nextMeta);
       setActivePage(nextMeta.currentPage || safePage);

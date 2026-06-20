@@ -38,7 +38,7 @@ async function inspectFile(file: string) {
       bytes: info.size,
       count,
       path: filePath,
-      sample: raw.slice(0, 250),
+      preview: raw.slice(0, 250),
     };
   } catch {
     return {
@@ -47,7 +47,7 @@ async function inspectFile(file: string) {
       bytes: 0,
       count: null,
       path: filePath,
-      sample: "",
+      preview: "",
     };
   }
 }

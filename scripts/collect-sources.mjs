@@ -186,7 +186,7 @@ function extractCompanyNameFromHiringText(text) {
     }
   }
 
-  let fallback = cleaned
+  let extractedName = cleaned
     .split("|")[0]
     .split(" - ")[0]
     .split(" — ")[0]
@@ -194,14 +194,14 @@ function extractCompanyNameFromHiringText(text) {
     .split(":")[0]
     .trim();
 
-  fallback = fallback
+  extractedName = extractedName
     .replace(/^at\s+/i, "")
     .replace(/\s+is hiring.*$/i, "")
     .replace(/\s+hiring.*$/i, "")
     .replace(/\s+\(.*?\)$/g, "")
     .trim();
 
-  if (!isBadCompanyName(fallback)) return fallback;
+  if (!isBadCompanyName(extractedName)) return extractedName;
 
   return null;
 }

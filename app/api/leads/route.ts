@@ -46,16 +46,29 @@ function getScore(lead: Record<string, any>) {
   return Number.isFinite(value) ? value : 0;
 }
 
-function sortByReviewOrder(rows: Record<string, any>[]) {
+function sortByBatchThenScore(rows: Record<string, any>[]) {
   return rows
     .map((row, index) => ({ row, index }))
     .sort((a, b) => {
       const seqA = Number(a.row.aiEnrichedSeq || 0);
       const seqB = Number(b.row.aiEnrichedSeq || 0);
 
+      const batchA = seqA > 0 ? Math.floor((seqA - 1) / 50) : Number.MAX_SAFE_INTEGER;
+      const batchB = seqB > 0 ? Math.floor((seqB - 1) / 50) : Number.MAX_SAFE_INTEGER;
+
+      // Keep 1-50, 51-100, 101-150 as fixed reviewed batches.
+      if (batchA !== batchB) return batchA - batchB;
+
+      // Inside each 50 batch, show strongest leads first.
+      const scoreA = getScore(a.row);
+      const scoreB = getScore(b.row);
+      if (scoreA !== scoreB) return scoreB - scoreA;
+
+      const confidenceA = Number(a.row.aiConfidence || a.row.confidence || 0);
+      const confidenceB = Number(b.row.aiConfidence || b.row.confidence || 0);
+      if (confidenceA !== confidenceB) return confidenceB - confidenceA;
+
       if (seqA > 0 && seqB > 0 && seqA !== seqB) return seqA - seqB;
-      if (seqA > 0 && seqB <= 0) return -1;
-      if (seqB > 0 && seqA <= 0) return 1;
 
       return a.index - b.index;
     })
@@ -76,7 +89,7 @@ export async function GET(request: Request) {
 
   const dashboardRows = await readJsonArray(dashboardPath);
   const precleanRows = await readJsonArray(precleanPath);
-  const sortedLeads = sortByReviewOrder(dashboardRows);
+  const sortedLeads = sortByBatchThenScore(dashboardRows);
 
   const pageSize = 50;
   const totalAvailable = sortedLeads.length;

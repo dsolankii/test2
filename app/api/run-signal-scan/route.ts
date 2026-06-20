@@ -21,9 +21,9 @@ async function readJsonArray(filePath: string) {
 export async function POST(request: Request) {
   applyWorkspaceToRequest(request);
 
-  if (process.env.VERCEL) {
-    await runLocalScript("scripts/blob-pull.mjs", 60 * 1000);
-  }
+  // Important: no blob-pull here.
+  // A new scan means a fully fresh pipeline run.
+  const reset = await runLocalScript("scripts/reset-all-runtime-data.mjs", 60 * 1000);
 
   const scan = await runLocalScript("scripts/run-source-scan.mjs", 25 * 60 * 1000);
 
@@ -43,7 +43,14 @@ export async function POST(request: Request) {
       ok: true,
       rawMentions: rawRows.length,
       uniqueCompanies,
-      logs: scan.stdout.slice(-12000),
+      logs: [
+        "--- reset-all-runtime-data.mjs ---",
+        reset.stdout,
+        reset.stderr,
+        "--- run-source-scan.mjs ---",
+        scan.stdout,
+        scan.stderr,
+      ].join("\n").slice(-15000),
     },
     { headers: { "Cache-Control": "no-store" } }
   );
