@@ -280,6 +280,7 @@ function getNextAction(lead: Lead) {
 export default function LeadsPage() {
   const [darkMode, setDarkMode] = useState(false);
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [activePage, setActivePage] = useState(0);
   const [leadMeta, setLeadMeta] = useState<LeadMeta>(emptyMeta);
   const [activeFilter, setActiveFilter] = useState("all");
   const [loading, setLoading] = useState(true);
@@ -304,11 +305,13 @@ export default function LeadsPage() {
     return;
   }
 
-  async function loadData(allowPrefetch = true) {
+  async function loadData(page = activePage) {
     setLoading(true);
 
+    const safePage = Math.max(0, Number.isFinite(Number(page)) ? Number(page) : 0);
+
     try {
-      const leadResponse = await fetch(`/api/leads?ts=${Date.now()}`, {
+      const leadResponse = await fetch(`/api/leads?page=${safePage}&ts=${Date.now()}`, {
         cache: "no-store",
       });
 
@@ -323,9 +326,13 @@ export default function LeadsPage() {
 
       setLeads(nextLeads);
       setLeadMeta(nextMeta);
-      setPageMessage("Showing current 50-lead page");
+      setActivePage(nextMeta.currentPage || safePage);
 
-      if (allowPrefetch) maybePrefetchNextBatch(nextMeta);
+      if (nextLeads.length > 0) {
+        setActiveFilter("all");
+      }
+
+      setPageMessage("Showing current 50-lead page");
     } catch (error) {
       setLeads([]);
       setLeadMeta(emptyMeta);
@@ -356,12 +363,18 @@ export default function LeadsPage() {
   async function movePage(direction: "prev" | "next") {
     if (movingPage) return;
 
+    const nextPage =
+      direction === "next"
+        ? Math.min(leadMeta.currentPage + 1, leadMeta.maxUnlockedPage)
+        : Math.max(leadMeta.currentPage - 1, 0);
+
     setMovingPage(direction);
     setPageMessage(direction === "next" ? "Loading next page..." : "Loading previous page...");
 
     try {
-      await postJson("/api/leads-page", { direction });
-      await loadData();
+      setActivePage(nextPage);
+      setActiveFilter("all");
+      await loadData(nextPage);
     } catch (error) {
       setPageMessage(error instanceof Error ? error.message : "Page move failed");
     } finally {
@@ -391,10 +404,16 @@ export default function LeadsPage() {
         });
       }, 900);
 
-      await postJson("/api/reveal-leads-next");
+      const result = await postJson("/api/reveal-leads-next");
+
+      const targetPage = Number.isFinite(Number(result.currentPage))
+        ? Number(result.currentPage)
+        : Math.max(Math.ceil(Number(result.afterReviewed || leadMeta.totalAvailable || 50) / 50) - 1, 0);
 
       setReviewProgress(100);
-      await loadData(false);
+      setActivePage(targetPage);
+      setActiveFilter("all");
+      await loadData(targetPage);
       setPageMessage("LLM review complete. Showing the new 50 leads.");
     } catch (error) {
       setPageMessage(error instanceof Error ? error.message : "Next 50 failed");
@@ -409,7 +428,7 @@ export default function LeadsPage() {
   }
 
   useEffect(() => {
-    loadData();
+    loadData(0);
   }, []);
 
   const filteredLeads = useMemo(() => {
