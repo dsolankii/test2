@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import crypto from "crypto";
 
 const COOKIE_NAME = "leadgrid_user_id";
 const HEADER_NAME = "x-leadgrid-user-id";
@@ -9,18 +10,22 @@ function safeWorkspaceId(value?: string | null) {
     .replace(/[^a-zA-Z0-9_-]/g, "_")
     .slice(0, 80);
 
-  return cleaned || "main";
+  return cleaned || "";
+}
+
+function createWorkspaceId() {
+  return `u_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
 function getWorkspaceId(request: NextRequest) {
-  // Production must use one shared workspace, otherwise every new browser/curl
-  // cookie creates a different empty data folder/blob prefix.
-  if (process.env.VERCEL) {
-    return safeWorkspaceId(process.env.LEADGRID_WORKSPACE_ID || "main");
-  }
+  // Optional admin/debug override only. Do not set this in normal production.
+  const forced = safeWorkspaceId(process.env.LEADGRID_FORCE_WORKSPACE_ID);
+  if (forced) return forced;
 
-  const existing = request.cookies.get(COOKIE_NAME)?.value;
-  return safeWorkspaceId(existing || "local");
+  const existing = safeWorkspaceId(request.cookies.get(COOKIE_NAME)?.value);
+  if (existing) return existing;
+
+  return createWorkspaceId();
 }
 
 function shouldRedirectToCanonical(request: NextRequest) {
@@ -28,6 +33,7 @@ function shouldRedirectToCanonical(request: NextRequest) {
   if (!canonical) return null;
 
   let canonicalUrl: URL;
+
   try {
     canonicalUrl = new URL(canonical);
   } catch {
