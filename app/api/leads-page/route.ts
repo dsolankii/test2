@@ -28,8 +28,10 @@ async function readJsonArray(filePath: string) {
 
 async function readTotalLeads() {
   const { dashboardPath, enrichedPath } = makePaths();
+
   const dashboardRows = await readJsonArray(dashboardPath);
   if (dashboardRows.length > 0) return dashboardRows.length;
+
   return (await readJsonArray(enrichedPath)).length;
 }
 
@@ -78,10 +80,12 @@ export async function POST(request: Request) {
   const totalPages = Math.max(Math.ceil(totalLeads / state.pageSize), 1);
   const maxUnlockedPage = Math.min(Math.max(state.maxUnlockedPage, 0), totalPages - 1);
 
+  const currentPage = Math.min(Math.max(state.currentPage, 0), maxUnlockedPage);
+
   const nextPage =
     direction === "next"
-      ? Math.min(state.currentPage + 1, maxUnlockedPage)
-      : Math.max(state.currentPage - 1, 0);
+      ? Math.min(currentPage + 1, maxUnlockedPage)
+      : Math.max(currentPage - 1, 0);
 
   const nextState = {
     currentPage: nextPage,

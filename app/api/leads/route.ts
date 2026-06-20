@@ -10,25 +10,6 @@ export const dynamic = "force-dynamic";
 
 type Lead = Record<string, any>;
 
-const EMPTY_META = {
-  dataVersion: Date.now(),
-  totalAvailable: 0,
-  totalPages: 1,
-  currentPage: 0,
-  maxUnlockedPage: 0,
-  pageSize: 50,
-  visibleStart: 0,
-  visibleEnd: 0,
-  visibleLeadCount: 0,
-  scoredVisibleLeads: 0,
-  hiddenLeft: 0,
-  canGoPrev: false,
-  canGoNext: false,
-  canUnlockNext: false,
-  nextStart: 0,
-  nextEnd: 0,
-};
-
 function makePaths() {
   return {
     statePath: dataPath("leadgrid-visible-state.json"),
@@ -127,11 +108,6 @@ async function readState() {
     };
 
     await writeFile(statePath, JSON.stringify(state, null, 2));
-
-    if (process.env.VERCEL) {
-      await runLocalScript("scripts/blob-push.mjs", 60 * 1000);
-    }
-
     return state;
   }
 }
@@ -144,6 +120,7 @@ export async function GET(request: Request) {
   }
 
   const allLeads = await readLeads();
+
   const sortedLeads = [...allLeads].sort((a, b) => {
     const scoreDiff = getScore(b) - getScore(a);
     if (scoreDiff !== 0) return scoreDiff;
@@ -169,9 +146,9 @@ export async function GET(request: Request) {
   const pageLeads = sortedLeads.slice(startIndex, endIndex);
 
   const nextPage = Math.min(maxUnlockedPage + 1, totalPages - 1);
-  const hasNextPrepared = maxUnlockedPage < totalPages - 1;
-  const nextStart = hasNextPrepared ? nextPage * state.pageSize + 1 : 0;
-  const nextEnd = hasNextPrepared
+  const canUnlockNext = maxUnlockedPage < totalPages - 1;
+  const nextStart = canUnlockNext ? nextPage * state.pageSize + 1 : 0;
+  const nextEnd = canUnlockNext
     ? Math.min((nextPage + 1) * state.pageSize, totalAvailable)
     : 0;
 
@@ -196,7 +173,7 @@ export async function GET(request: Request) {
         ),
         canGoPrev: currentPage > 0,
         canGoNext: currentPage < maxUnlockedPage,
-        canUnlockNext: hasNextPrepared,
+        canUnlockNext,
         nextStart,
         nextEnd,
       },

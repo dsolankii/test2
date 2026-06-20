@@ -367,11 +367,20 @@ export default function LeadsPage() {
 
   const mutedText = darkMode ? "text-slate-400" : "text-slate-600";
 
-  async function loadData() {
+  
+function queueNextBatchPrefetch(meta: LeadMeta) {
+  if (!meta || !meta.canUnlockNext) return;
+
+  fetch("/api/prefetch-next-batch", {
+    method: "POST",
+  }).catch(() => {});
+}
+
+async function loadData() {
     setLoading(true);
 
     try {
-      const leadResponse = await fetch("/api/leads", { cache: "no-store" });
+      const leadResponse = await fetch(`/api/leads?ts=${Date.now()}`, { cache: "no-store" });
       const leadData = await leadResponse.json();
 
       if (!leadResponse.ok || leadData.ok === false) {
@@ -379,7 +388,7 @@ export default function LeadsPage() {
       }
 
       setLeads(Array.isArray(leadData.leads) ? leadData.leads : []);
-      setLeadMeta(leadData.meta || emptyMeta);
+      const nextMeta = leadData.meta || emptyMeta; setLeadMeta(nextMeta); queueNextBatchPrefetch(nextMeta);
     } catch (error) {
       setLeads([]);
       setLeadMeta(emptyMeta);
@@ -605,16 +614,7 @@ export default function LeadsPage() {
         <section className={panelClass + " p-5"}>
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
-              <p className="text-xs font-black uppercase tracking-[0.2em] text-violet-600">
-                Lead Card
-              </p>
-              <h2 className="mt-1 text-2xl font-black">
-                {leadMeta.visibleStart}-{leadMeta.visibleEnd} Leads
-              </h2>
-              <p className={"mt-1 text-sm " + mutedText}>
-                Page {leadMeta.currentPage + 1} of {leadMeta.totalPages} ·{" "}
-                {filteredLeads.length} shown
-              </p>
+              <h2 className="text-2xl font-black">Lead Card</h2>
             </div>
 
             <div className="flex items-center gap-3">

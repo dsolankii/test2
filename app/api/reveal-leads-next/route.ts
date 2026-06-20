@@ -28,8 +28,10 @@ async function readJsonArray(filePath: string) {
 
 async function readTotalLeads() {
   const { dashboardPath, enrichedPath } = makePaths();
+
   const dashboardRows = await readJsonArray(dashboardPath);
   if (dashboardRows.length > 0) return dashboardRows.length;
+
   return (await readJsonArray(enrichedPath)).length;
 }
 
@@ -60,6 +62,28 @@ async function readState() {
   }
 }
 
+async function buildMoreIfNeeded(state: { maxUnlockedPage: number; pageSize: number }) {
+  let totalLeads = await readTotalLeads();
+  let totalPages = Math.max(Math.ceil(totalLeads / state.pageSize), 1);
+
+  const needsMoreBuiltRows = state.maxUnlockedPage >= totalPages - 1;
+
+  if (needsMoreBuiltRows) {
+    await runLocalScript("scripts/preclean-real-sources.mjs", 10 * 60 * 1000);
+    await runLocalScript("scripts/enrich-company-batch-ai.mjs", 25 * 60 * 1000);
+    await runLocalScript("scripts/build-company-dashboard-dataset.mjs", 10 * 60 * 1000);
+
+    totalLeads = await readTotalLeads();
+    totalPages = Math.max(Math.ceil(totalLeads / state.pageSize), 1);
+  }
+
+  return {
+    totalLeads,
+    totalPages,
+    builtMore: needsMoreBuiltRows,
+  };
+}
+
 export async function POST(request: Request) {
   applyWorkspaceToRequest(request);
 
@@ -71,26 +95,13 @@ export async function POST(request: Request) {
     const { statePath } = makePaths();
     await mkdir(path.dirname(statePath), { recursive: true });
 
-    const beforeTotal = await readTotalLeads();
-    const beforeState = await readState();
-    const beforePages = Math.max(Math.ceil(beforeTotal / beforeState.pageSize), 1);
-
-    const alreadyNearEnd = beforeState.maxUnlockedPage >= beforePages - 2;
-    const hasNoRowsYet = beforeTotal === 0;
-    const shouldReviewMore = hasNoRowsYet || alreadyNearEnd;
-
-    if (shouldReviewMore) {
-      await runLocalScript("scripts/enrich-company-batch-ai.mjs", 25 * 60 * 1000);
-      await runLocalScript("scripts/build-company-dashboard-dataset.mjs", 10 * 60 * 1000);
-    }
-
-    const totalLeads = await readTotalLeads();
     const state = await readState();
-    const totalPages = Math.max(Math.ceil(totalLeads / state.pageSize), 1);
+    const built = await buildMoreIfNeeded(state);
 
+    const maxExistingPage = Math.max(built.totalPages - 1, 0);
     const nextUnlockedPage = Math.min(
       Math.max(state.maxUnlockedPage + 1, 0),
-      totalPages - 1
+      maxExistingPage
     );
 
     const nextState = {
@@ -105,20 +116,20 @@ export async function POST(request: Request) {
       await runLocalScript("scripts/blob-push.mjs", 60 * 1000);
     }
 
-    const nextPipelinePage = Math.min(nextUnlockedPage + 1, totalPages - 1);
-    const hasNext = nextUnlockedPage < totalPages - 1;
+    const upcomingPage = Math.min(nextUnlockedPage + 1, maxExistingPage);
+    const hasNext = nextUnlockedPage < maxExistingPage;
 
     return NextResponse.json(
       {
         ok: true,
         currentPage: nextUnlockedPage,
         maxUnlockedPage: nextUnlockedPage,
-        totalPages,
-        reviewedMore: shouldReviewMore,
+        totalPages: built.totalPages,
+        reviewedMore: built.builtMore,
         canUnlockNext: hasNext,
-        nextStart: hasNext ? nextPipelinePage * state.pageSize + 1 : 0,
+        nextStart: hasNext ? upcomingPage * state.pageSize + 1 : 0,
         nextEnd: hasNext
-          ? Math.min((nextPipelinePage + 1) * state.pageSize, totalLeads)
+          ? Math.min((upcomingPage + 1) * state.pageSize, built.totalLeads)
           : 0,
       },
       {

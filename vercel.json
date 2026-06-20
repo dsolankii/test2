@@ -8,6 +8,9 @@
     },
     "app/api/reveal-leads-next/route.ts": {
       "maxDuration": 300
+    },
+    "app/api/prefetch-next-batch/route.ts": {
+      "maxDuration": 300
     }
   }
 }
