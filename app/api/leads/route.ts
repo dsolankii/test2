@@ -168,10 +168,7 @@ export async function GET(request: Request) {
         visibleEnd: endIndex,
         visibleLeadCount: pageLeads.length,
         scoredVisibleLeads: pageLeads.filter((lead) => getScore(lead) > 0).length,
-        hiddenLeft: Math.max(
-          totalAvailable - Math.min((maxUnlockedPage + 1) * state.pageSize, totalAvailable),
-          0
-        ),
+        hiddenLeft: Math.max(totalAvailable - endIndex, 0),
         canGoPrev: currentPage > 0,
         canGoNext: currentPage < maxUnlockedPage,
         canUnlockNext,

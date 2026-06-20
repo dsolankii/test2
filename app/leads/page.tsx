@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Lead = Record<string, any>;
 
@@ -356,6 +356,8 @@ export default function LeadsPage() {
   const [loading, setLoading] = useState(true);
   const [movingPage, setMovingPage] = useState<"prev" | "next" | "unlock" | null>(null);
   const [pageMessage, setPageMessage] = useState("Showing current 50-lead page");
+  const [prefetchStatus, setPrefetchStatus] = useState("");
+  const prefetchQueuedRef = useRef(false);
 
   const pageClass = darkMode
     ? "relative min-h-screen overflow-hidden bg-[#070816] text-white"
@@ -367,28 +369,51 @@ export default function LeadsPage() {
 
   const mutedText = darkMode ? "text-slate-400" : "text-slate-600";
 
-  
-function queueNextBatchPrefetch(meta: LeadMeta) {
-  if (!meta || !meta.canUnlockNext) return;
+  async function maybePrefetchNextBatch(meta: LeadMeta) {
+    if (!meta.canUnlockNext || prefetchQueuedRef.current) return;
 
-  fetch("/api/prefetch-next-batch", {
-    method: "POST",
-  }).catch(() => {});
-}
+    prefetchQueuedRef.current = true;
+    setPrefetchStatus("Preparing the next 50 in the background...");
 
-async function loadData() {
+    try {
+      const response = await fetch("/api/prefetch-next-batch", {
+        method: "POST",
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok || data.ok === false) {
+        throw new Error(data.error || "Background preparation failed");
+      }
+
+      setPrefetchStatus("Next batch is prepared.");
+    } catch {
+      setPrefetchStatus("Next batch will prepare when you click Next 50.");
+    }
+  }
+
+  async function loadData() {
     setLoading(true);
 
     try {
-      const leadResponse = await fetch(`/api/leads?ts=${Date.now()}`, { cache: "no-store" });
+      const leadResponse = await fetch(`/api/leads?ts=${Date.now()}`, {
+        cache: "no-store",
+      });
+
       const leadData = await leadResponse.json();
 
       if (!leadResponse.ok || leadData.ok === false) {
         throw new Error(leadData.error || "Failed to load leads");
       }
 
-      setLeads(Array.isArray(leadData.leads) ? leadData.leads : []);
-      const nextMeta = leadData.meta || emptyMeta; setLeadMeta(nextMeta); queueNextBatchPrefetch(nextMeta);
+      const nextLeads = Array.isArray(leadData.leads) ? leadData.leads : [];
+      const nextMeta = leadData.meta || emptyMeta;
+
+      setLeads(nextLeads);
+      setLeadMeta(nextMeta);
+      setPageMessage("Showing current 50-lead page");
+
+      maybePrefetchNextBatch(nextMeta);
     } catch (error) {
       setLeads([]);
       setLeadMeta(emptyMeta);
@@ -417,13 +442,14 @@ async function loadData() {
   }
 
   async function movePage(direction: "prev" | "next") {
+    if (movingPage) return;
+
     setMovingPage(direction);
-    setPageMessage(direction === "next" ? "Loading next 50 leads..." : "Loading previous 50 leads...");
+    setPageMessage(direction === "next" ? "Loading next page..." : "Loading previous page...");
 
     try {
       await postJson("/api/leads-page", { direction });
       await loadData();
-      setPageMessage("Showing current 50-lead page");
     } catch (error) {
       setPageMessage(error instanceof Error ? error.message : "Page move failed");
     } finally {
@@ -432,11 +458,14 @@ async function loadData() {
   }
 
   async function unlockNext50() {
+    if (movingPage) return;
+
     setMovingPage("unlock");
     setPageMessage("Unlocking next 50 leads...");
 
     try {
       await postJson("/api/reveal-leads-next");
+      prefetchQueuedRef.current = false;
       await loadData();
       setPageMessage("Next 50 leads unlocked");
     } catch (error) {
@@ -480,72 +509,98 @@ async function loadData() {
 
   return (
     <main className={pageClass}>
-      <div className="mx-auto grid max-w-7xl gap-6 px-6 py-8 lg:grid-cols-[340px_1fr]">
-        <aside className={panelClass + " h-fit p-5"}>
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-xs font-black uppercase tracking-[0.2em] text-violet-600">
-                LeadGrid
-              </p>
-              <h1 className="mt-2 text-3xl font-black">Reviewed Leads</h1>
-            </div>
+      <nav
+        className={
+          darkMode
+            ? "sticky top-0 z-20 border-b border-white/10 bg-[#070816]/90 backdrop-blur"
+            : "sticky top-0 z-20 border-b border-slate-950/10 bg-[#fff0bd]/90 backdrop-blur"
+        }
+      >
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
+          <Link href="/landing-page" className="text-xl font-black tracking-tight">
+            LeadGrid
+          </Link>
+
+          <div className="flex items-center gap-2 text-xs font-black uppercase tracking-[0.14em]">
+            <Link className="rounded-full px-4 py-2 hover:bg-white/60" href="/landing-page">
+              Home
+            </Link>
+            <Link className="rounded-full px-4 py-2 hover:bg-white/60" href="/console">
+              Console
+            </Link>
+            <Link className="rounded-full bg-slate-950 px-4 py-2 text-white" href="/leads">
+              Leads
+            </Link>
             <button
               onClick={() => setDarkMode(!darkMode)}
               className={
                 darkMode
-                  ? "grid h-10 w-10 place-items-center rounded-full border border-white/10 bg-slate-900 text-lg"
-                  : "grid h-10 w-10 place-items-center rounded-full border border-slate-950/10 bg-white/80 text-lg"
+                  ? "ml-2 grid h-9 w-9 place-items-center rounded-full border border-white/10 bg-slate-900 text-lg"
+                  : "ml-2 grid h-9 w-9 place-items-center rounded-full border border-slate-950/10 bg-white/80 text-lg"
               }
               aria-label="Toggle color mode"
             >
               {darkMode ? "☀" : "☾"}
             </button>
           </div>
+        </div>
+      </nav>
 
-          <div className="mt-5 flex gap-3">
-            <Link
-              href="/console"
-              className="retro-box flex-1 bg-slate-950 px-4 py-3 text-center text-xs font-black uppercase tracking-[0.14em] text-white"
-            >
-              Run Console
-            </Link>
-            <a
-              href="/api/leads-csv"
-              className="retro-box flex-1 bg-white px-4 py-3 text-center text-xs font-black uppercase tracking-[0.14em] text-slate-950"
-            >
-              CSV
-            </a>
+      <div className="mx-auto grid max-w-7xl gap-6 px-6 py-6 lg:grid-cols-[320px_1fr]">
+        <aside className={panelClass + " h-fit p-5"}>
+          <div>
+            <p className="text-xs font-black uppercase tracking-[0.2em] text-violet-600">
+              LeadGrid
+            </p>
+            <h1 className="mt-2 text-3xl font-black">Reviewed Leads</h1>
+            <p className={"mt-2 text-sm " + mutedText}>
+              Showing {leadMeta.visibleStart}-{leadMeta.visibleEnd} of {leadMeta.totalAvailable}
+            </p>
           </div>
 
           <section className="mt-6">
             <h2 className="text-sm font-black uppercase tracking-[0.16em]">Queue Controls</h2>
-            <button
-              onClick={() => {
-                if (!loading && leadMeta.canUnlockNext && movingPage === null) {
-                  unlockNext50();
+
+            <div className="mt-4 grid gap-3">
+              <button
+                onClick={() => {
+                  if (!loading && leadMeta.canUnlockNext && movingPage === null) {
+                    unlockNext50();
+                  }
+                }}
+                disabled={loading || !leadMeta.canUnlockNext || movingPage !== null}
+                className={
+                  loading || !leadMeta.canUnlockNext || movingPage !== null
+                    ? "retro-box w-full bg-slate-950 px-6 py-4 text-sm font-black uppercase tracking-[0.16em] text-white opacity-50 shadow-[8px_8px_0_rgba(139,92,246,0.65)]"
+                    : "retro-box w-full bg-slate-950 px-6 py-4 text-sm font-black uppercase tracking-[0.16em] text-white shadow-[8px_8px_0_rgba(139,92,246,0.65)] transition hover:-translate-y-1"
                 }
-              }}
-              disabled={loading || !leadMeta.canUnlockNext || movingPage !== null}
-              className={
-                loading || !leadMeta.canUnlockNext || movingPage !== null
-                  ? "retro-box mt-5 w-full bg-slate-950 px-8 py-5 text-sm font-black uppercase tracking-[0.16em] text-white opacity-50 shadow-[8px_8px_0_rgba(139,92,246,0.65)]"
-                  : "retro-box mt-5 w-full bg-slate-950 px-8 py-5 text-sm font-black uppercase tracking-[0.16em] text-white shadow-[8px_8px_0_rgba(139,92,246,0.65)] transition hover:-translate-y-1"
-              }
-            >
-              {loading
-                ? "Loading"
-                : !leadMeta.canUnlockNext
-                  ? "All Done"
-                  : movingPage === "unlock"
-                    ? "Loading"
-                    : "Next 50"}
-            </button>
+              >
+                {loading
+                  ? "Loading"
+                  : !leadMeta.canUnlockNext
+                    ? "All Done"
+                    : movingPage === "unlock"
+                      ? "Loading"
+                      : "Next 50"}
+              </button>
+
+              <a
+                href={`/api/leads-csv?ts=${Date.now()}`}
+                className="retro-box w-full bg-white px-6 py-4 text-center text-sm font-black uppercase tracking-[0.16em] text-slate-950 transition hover:-translate-y-1"
+              >
+                Download CSV
+              </a>
+            </div>
+
             <p className={"mt-3 text-sm " + mutedText}>
               {leadMeta.canUnlockNext
                 ? `Next up: ${leadMeta.nextStart}-${leadMeta.nextEnd}`
                 : "All leads unlocked"}
             </p>
             <p className={"mt-2 text-xs " + mutedText}>{pageMessage}</p>
+            {prefetchStatus ? (
+              <p className={"mt-2 text-xs " + mutedText}>{prefetchStatus}</p>
+            ) : null}
           </section>
 
           <section className="mt-6">
@@ -565,6 +620,7 @@ async function loadData() {
                 </div>
               ))}
             </div>
+
             <div className="mt-4 space-y-3">
               {[
                 { label: "Queue viewed", value: visiblePercent },
@@ -577,7 +633,7 @@ async function loadData() {
                   </div>
                   <div className="h-2 rounded-full bg-slate-200">
                     <div
-                      className="h-2 rounded-full bg-slate-950"
+                      className="h-2 rounded-full bg-slate-950 transition-all"
                       style={{ width: `${Math.max(Math.min(bar.value, 100), 0)}%` }}
                     />
                   </div>
@@ -611,10 +667,13 @@ async function loadData() {
           </section>
         </aside>
 
-        <section className={panelClass + " p-5"}>
+        <section className={panelClass + " flex min-h-[calc(100vh-120px)] flex-col p-5"}>
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
               <h2 className="text-2xl font-black">Lead Card</h2>
+              <p className={"mt-1 text-sm " + mutedText}>
+                Scroll inside this panel. Current range: {leadMeta.visibleStart}-{leadMeta.visibleEnd}
+              </p>
             </div>
 
             <div className="flex items-center gap-3">
@@ -631,12 +690,14 @@ async function loadData() {
               >
                 ←
               </button>
-              <div className="text-center text-xs font-black uppercase tracking-[0.14em]">
+
+              <div className="min-w-[100px] text-center text-xs font-black uppercase tracking-[0.14em]">
                 <p>Range</p>
                 <p>
                   {leadMeta.visibleStart}-{leadMeta.visibleEnd}
                 </p>
               </div>
+
               <button
                 onClick={() => {
                   if (leadMeta.canGoNext && movingPage === null) movePage("next");
@@ -653,94 +714,99 @@ async function loadData() {
             </div>
           </div>
 
-          {loading && (
-            <div className="retro-box mt-6 bg-white/80 p-6 text-slate-950">
-              Loading reviewed leads...
-            </div>
-          )}
+          <div className="mt-5 flex-1 overflow-hidden">
+            {loading && (
+              <div className="retro-box bg-white/80 p-6 text-slate-950">
+                Loading reviewed leads...
+              </div>
+            )}
 
-          {!loading && filteredLeads.length === 0 && (
-            <div className="retro-box mt-6 bg-white/80 p-6 text-slate-950">
-              <h3 className="text-xl font-black">No leads found in this filter.</h3>
-              <p className="mt-2 text-sm">
-                Try another filter, run review from the console, or unlock the next 50 leads.
-              </p>
-            </div>
-          )}
+            {!loading && filteredLeads.length === 0 && (
+              <div className="retro-box bg-white/80 p-6 text-slate-950">
+                <h3 className="text-xl font-black">No leads found in this filter.</h3>
+                <p className="mt-2 text-sm">
+                  Try another filter, run review from the console, or unlock the next 50 leads.
+                </p>
+              </div>
+            )}
 
-          <div className="mt-6 grid gap-4">
-            {!loading &&
-              filteredLeads.map((lead, index) => {
-                const decision = getDecision(lead);
-                const score = getScore(lead);
-                const sourceUrl = getSourceUrl(lead);
-                const sourceName = getSourceName(lead);
+            {!loading && filteredLeads.length > 0 && (
+              <div className="max-h-[calc(100vh-250px)] overflow-y-auto pr-3">
+                <div className="grid gap-4">
+                  {filteredLeads.map((lead, index) => {
+                    const decision = getDecision(lead);
+                    const score = getScore(lead);
+                    const sourceUrl = getSourceUrl(lead);
+                    const sourceName = getSourceName(lead);
 
-                return (
-                  <article
-                    key={`${getCompanyName(lead)}-${sourceName}-${index}`}
-                    className={
-                      darkMode
-                        ? "retro-box border border-slate-800 bg-slate-900 p-5 transition hover:-translate-y-1 hover:border-cyan-300"
-                        : "retro-box border border-slate-300 bg-white p-5 transition hover:-translate-y-1 hover:border-violet-500"
-                    }
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-4">
-                      <div>
-                        <p className="text-xs font-black uppercase tracking-[0.16em] text-violet-600">
-                          {getDecisionLabel(decision)}
-                        </p>
-                        <h3 className="mt-2 text-2xl font-black">{getCompanyName(lead)}</h3>
-                        <p className={"mt-1 text-sm " + mutedText}>
-                          Source: {sourceName}{" "}
-                          {sourceUrl ? (
-                            <a
-                              className="font-bold underline"
-                              href={sourceUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              Open source ↗
-                            </a>
-                          ) : (
-                            "Source unavailable"
-                          )}
-                        </p>
-                      </div>
+                    return (
+                      <article
+                        key={`${getCompanyName(lead)}-${sourceName}-${index}`}
+                        className={
+                          darkMode
+                            ? "retro-box border border-slate-800 bg-slate-900 p-5 transition hover:-translate-y-1 hover:border-cyan-300"
+                            : "retro-box border border-slate-300 bg-white p-5 transition hover:-translate-y-1 hover:border-violet-500"
+                        }
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-4">
+                          <div>
+                            <p className="text-xs font-black uppercase tracking-[0.16em] text-violet-600">
+                              {getDecisionLabel(decision)}
+                            </p>
+                            <h3 className="mt-2 text-2xl font-black">{getCompanyName(lead)}</h3>
+                            <p className={"mt-1 text-sm " + mutedText}>
+                              Source: {sourceName}{" "}
+                              {sourceUrl ? (
+                                <a
+                                  className="font-bold underline"
+                                  href={sourceUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  Open source ↗
+                                </a>
+                              ) : (
+                                "Source unavailable"
+                              )}
+                            </p>
+                          </div>
 
-                      <div className="retro-box bg-slate-950 px-4 py-3 text-center text-white">
-                        <p className="text-[10px] font-black uppercase tracking-[0.16em]">
-                          Score
-                        </p>
-                        <p className="text-2xl font-black">{score}</p>
-                      </div>
-                    </div>
+                          <div className="retro-box bg-slate-950 px-4 py-3 text-center text-white">
+                            <p className="text-[10px] font-black uppercase tracking-[0.16em]">
+                              Score
+                            </p>
+                            <p className="text-2xl font-black">{score}</p>
+                          </div>
+                        </div>
 
-                    <div className="mt-5 grid gap-4 md:grid-cols-3">
-                      <div>
-                        <p className="text-xs font-black uppercase tracking-[0.16em] text-violet-600">
-                          Why now
-                        </p>
-                        <p className="mt-2 text-sm leading-6">{getWhyNow(lead)}</p>
-                      </div>
+                        <div className="mt-5 grid gap-4 md:grid-cols-3">
+                          <div>
+                            <p className="text-xs font-black uppercase tracking-[0.16em] text-violet-600">
+                              Why now
+                            </p>
+                            <p className="mt-2 text-sm leading-6">{getWhyNow(lead)}</p>
+                          </div>
 
-                      <div>
-                        <p className="text-xs font-black uppercase tracking-[0.16em] text-violet-600">
-                          ICP Fit
-                        </p>
-                        <p className="mt-2 text-sm leading-6">{getIcpFit(lead)}</p>
-                      </div>
+                          <div>
+                            <p className="text-xs font-black uppercase tracking-[0.16em] text-violet-600">
+                              ICP Fit
+                            </p>
+                            <p className="mt-2 text-sm leading-6">{getIcpFit(lead)}</p>
+                          </div>
 
-                      <div>
-                        <p className="text-xs font-black uppercase tracking-[0.16em] text-violet-600">
-                          Next action
-                        </p>
-                        <p className="mt-2 text-sm leading-6">{getNextAction(lead)}</p>
-                      </div>
-                    </div>
-                  </article>
-                );
-              })}
+                          <div>
+                            <p className="text-xs font-black uppercase tracking-[0.16em] text-violet-600">
+                              Next action
+                            </p>
+                            <p className="mt-2 text-sm leading-6">{getNextAction(lead)}</p>
+                          </div>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         </section>
       </div>
