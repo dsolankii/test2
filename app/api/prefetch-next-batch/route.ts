@@ -35,11 +35,14 @@ export async function POST(request: Request) {
     return NextResponse.json({
       ok: true,
       status: "already_running",
-      message: "Next batch is already being prepared.",
+      message: "Next 50 is already being reviewed by LLM.",
     });
   }
 
   await writeFile(lockPath, new Date().toISOString());
+
+  const previousSkipStatePush = process.env.LEADGRID_SKIP_VISIBLE_STATE_PUSH;
+  process.env.LEADGRID_SKIP_VISIBLE_STATE_PUSH = "true";
 
   const logs: string[] = [];
 
@@ -58,18 +61,7 @@ export async function POST(request: Request) {
     logs.push(build.stdout);
 
     if (process.env.VERCEL) {
-      const previousSkipStatePush = process.env.LEADGRID_SKIP_VISIBLE_STATE_PUSH;
-      process.env.LEADGRID_SKIP_VISIBLE_STATE_PUSH = "true";
-
-      try {
-        await runLocalScript("scripts/blob-push.mjs", 60 * 1000);
-      } finally {
-        if (previousSkipStatePush === undefined) {
-          delete process.env.LEADGRID_SKIP_VISIBLE_STATE_PUSH;
-        } else {
-          process.env.LEADGRID_SKIP_VISIBLE_STATE_PUSH = previousSkipStatePush;
-        }
-      }
+      await runLocalScript("scripts/blob-push.mjs", 60 * 1000);
     }
 
     await writeFile(
@@ -83,7 +75,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       ok: true,
       status: "completed",
-      message: "Next reviewed lead batch is prepared.",
+      message: "Next 50 LLM-reviewed leads are prepared.",
     });
   } catch (error) {
     await writeFile(
@@ -101,6 +93,12 @@ export async function POST(request: Request) {
       { status: 500 }
     );
   } finally {
+    if (previousSkipStatePush === undefined) {
+      delete process.env.LEADGRID_SKIP_VISIBLE_STATE_PUSH;
+    } else {
+      process.env.LEADGRID_SKIP_VISIBLE_STATE_PUSH = previousSkipStatePush;
+    }
+
     await rm(lockPath, { force: true }).catch(() => {});
   }
 }

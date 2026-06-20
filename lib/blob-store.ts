@@ -86,7 +86,6 @@ export async function pullBlobData() {
   let pulled = 0;
 
   for (const file of FILES) {
-    if (process.env.LEADGRID_SKIP_VISIBLE_STATE_PUSH === "true" && file === "leadgrid-visible-state.json") continue;
     const pathname = blobPath(file);
     const blob = byPath.get(pathname);
     if (!blob) continue;

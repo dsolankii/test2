@@ -315,9 +315,12 @@ export default function LeadsPage() {
         throw new Error(data.error || "Background preparation failed");
       }
 
-      setPrefetchStatus("Next batch is prepared."); await loadData(false);
+      setPrefetchStatus("Next batch is prepared.");
+      prefetchQueuedRef.current = false;
+      await loadData(false); await loadData(false);
     } catch {
       setPrefetchStatus("Next batch will prepare when you click Next 50.");
+      prefetchQueuedRef.current = false;
     }
   }
 
@@ -397,6 +400,7 @@ export default function LeadsPage() {
       prefetchQueuedRef.current = false;
       await loadData();
       setPageMessage("Next 50 leads unlocked");
+      prefetchQueuedRef.current = false;
     } catch (error) {
       setPageMessage(error instanceof Error ? error.message : "Next 50 failed");
     } finally {
