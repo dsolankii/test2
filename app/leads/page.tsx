@@ -286,6 +286,7 @@ export default function LeadsPage() {
   const [movingPage, setMovingPage] = useState<"prev" | "next" | "unlock" | null>(null);
   const [pageMessage, setPageMessage] = useState("Showing current 50-lead page");
   const [prefetchStatus, setPrefetchStatus] = useState("");
+  const [reviewProgress, setReviewProgress] = useState(0);
   const prefetchQueuedRef = useRef(false);
 
   const pageClass = darkMode
@@ -298,30 +299,9 @@ export default function LeadsPage() {
 
   const mutedText = darkMode ? "text-slate-400" : "text-slate-600";
 
-  async function maybePrefetchNextBatch(meta: LeadMeta) {
-    if (!meta.canUnlockNext || prefetchQueuedRef.current) return;
-
-    prefetchQueuedRef.current = true;
-    setPrefetchStatus(meta.totalAvailable <= 0 ? "" : "Preparing the next 50 in the background...");
-
-    try {
-      const response = await fetch("/api/prefetch-next-batch", {
-        method: "POST",
-      });
-
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok || data.ok === false) {
-        throw new Error(data.error || "Background preparation failed");
-      }
-
-      setPrefetchStatus("Next batch is prepared.");
-      prefetchQueuedRef.current = false;
-      await loadData(false); await loadData(false);
-    } catch {
-      setPrefetchStatus("Next batch will prepare when you click Next 50.");
-      prefetchQueuedRef.current = false;
-    }
+  async function maybePrefetchNextBatch(_meta: LeadMeta) {
+    // Background prefetch disabled to keep paging/state simple and reliable.
+    return;
   }
 
   async function loadData(allowPrefetch = true) {
@@ -393,18 +373,38 @@ export default function LeadsPage() {
     if (movingPage) return;
 
     setMovingPage("unlock");
-    setPageMessage(leadMeta.totalAvailable <= 0 ? "LLM is reviewing the first 50 companies. Please wait..." : "LLM is reviewing the next 50 companies. Please wait...");
+    setReviewProgress(5);
+    setPrefetchStatus("");
+    setPageMessage(
+      leadMeta.totalAvailable <= 0
+        ? "LLM is reviewing the first 50 companies. Please wait..."
+        : "LLM is reviewing the next 50 companies. Please wait..."
+    );
+
+    let timer: ReturnType<typeof setInterval> | null = null;
 
     try {
+      timer = setInterval(() => {
+        setReviewProgress((value) => {
+          if (value >= 92) return value;
+          return value + 4;
+        });
+      }, 900);
+
       await postJson("/api/reveal-leads-next");
-      prefetchQueuedRef.current = false;
-      await loadData();
-      setPageMessage("Next 50 leads unlocked");
-      prefetchQueuedRef.current = false;
+
+      setReviewProgress(100);
+      await loadData(false);
+      setPageMessage("LLM review complete. Showing reviewed leads.");
     } catch (error) {
       setPageMessage(error instanceof Error ? error.message : "Next 50 failed");
     } finally {
-      setMovingPage(null);
+      if (timer) clearInterval(timer);
+
+      setTimeout(() => {
+        setMovingPage(null);
+        setReviewProgress(0);
+      }, 600);
     }
   }
 
@@ -437,7 +437,7 @@ export default function LeadsPage() {
       ? Math.round((leadMeta.scoredVisibleLeads / leadMeta.visibleLeadCount) * 100)
       : 0;
 
-  const llmProgressPercent = movingPage === "unlock" ? 65 : reviewedPercent;
+  const llmProgressPercent = movingPage === "unlock" ? reviewProgress : reviewedPercent;
 
   return (
     <main className={pageClass}>
@@ -518,11 +518,11 @@ export default function LeadsPage() {
                 }
               >
                 {loading
-                  ? "Loading"
+                  ? "LLM Reviewing..."
                   : leadMeta.pendingReview <= 0 && !leadMeta.canUnlockNext
                     ? "All Done"
                     : movingPage === "unlock"
-                      ? "LLM Reviewing"
+                      ? "LLM Reviewing..."
                       : "Next 50"}
               </button>
 

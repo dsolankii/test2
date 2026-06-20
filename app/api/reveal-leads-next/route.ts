@@ -67,11 +67,11 @@ export async function POST(request: Request) {
     const state = await readState();
     const pageSize = state.pageSize || 50;
 
-    const candidatesBefore = await readJsonArray(precleanPath);
+    const candidates = await readJsonArray(precleanPath);
     let dashboardRows = await readJsonArray(dashboardPath);
     let aiRows = await readJsonArray(aiPath);
 
-    if (candidatesBefore.length <= 0) {
+    if (candidates.length <= 0) {
       return NextResponse.json(
         {
           ok: false,
@@ -86,15 +86,19 @@ export async function POST(request: Request) {
     let totalLeads = dashboardRows.length;
     let totalPages = Math.max(Math.ceil(totalLeads / pageSize), 1);
     let lastPreparedPage = Math.max(totalPages - 1, 0);
-    let currentMaxUnlocked = Math.min(Math.max(state.maxUnlockedPage, 0), lastPreparedPage);
+
+    const currentMaxUnlocked = Math.min(
+      Math.max(state.maxUnlockedPage, 0),
+      lastPreparedPage
+    );
 
     let targetPage = totalLeads === 0 ? 0 : currentMaxUnlocked + 1;
     let reviewedMore = false;
     let logs = "";
 
-    const needsLlmBatch = totalLeads === 0 || targetPage > lastPreparedPage;
+    const needsNewLlmBatch = totalLeads === 0 || targetPage > lastPreparedPage;
 
-    if (needsLlmBatch) {
+    if (needsNewLlmBatch) {
       reviewedMore = true;
 
       const enrich = await runLocalScript("scripts/enrich-company-batch-ai.mjs", 25 * 60 * 1000);
@@ -103,10 +107,7 @@ export async function POST(request: Request) {
       const build = await runLocalScript("scripts/build-company-dashboard-dataset.mjs", 10 * 60 * 1000);
       logs += "\n\n--- build-company-dashboard-dataset.mjs ---\n" + build.stdout + "\n" + build.stderr;
 
-      if (process.env.VERCEL) {
-        await runLocalScript("scripts/blob-pull.mjs", 60 * 1000);
-      }
-
+      // Important: do NOT blob-pull here. That can overwrite the newly-built local files.
       dashboardRows = await readJsonArray(dashboardPath);
       aiRows = await readJsonArray(aiPath);
 
@@ -119,11 +120,11 @@ export async function POST(request: Request) {
           {
             ok: false,
             error:
-              "LLM ran, but dashboard is still 0. The AI step did not produce usable reviewed rows.",
-            candidates: candidatesBefore.length,
+              "LLM ran, but dashboard is still 0. Check AI key/model and qualification logs.",
+            candidates: candidates.length,
             aiRows: aiRows.length,
             dashboardRows: totalLeads,
-            logs: logs.slice(-4000),
+            logs: logs.slice(-5000),
           },
           { status: 500, headers: { "Cache-Control": "no-store" } }
         );
@@ -146,13 +147,13 @@ export async function POST(request: Request) {
 
     const upcomingPage = nextState.maxUnlockedPage + 1;
     const hasPreparedNext = upcomingPage <= lastPreparedPage;
-    const hasPending = candidatesBefore.length > totalLeads;
+    const hasPendingCandidates = candidates.length > totalLeads;
 
     return NextResponse.json(
       {
         ok: true,
         reviewedMore,
-        candidates: candidatesBefore.length,
+        candidates: candidates.length,
         aiRows: aiRows.length,
         dashboardRows: totalLeads,
         currentPage: nextState.currentPage,
@@ -160,9 +161,11 @@ export async function POST(request: Request) {
         totalPages,
         canGoPrev: nextState.currentPage > 0,
         canGoNext: nextState.currentPage < nextState.maxUnlockedPage,
-        canUnlockNext: hasPreparedNext || hasPending,
+        canUnlockNext: hasPreparedNext || hasPendingCandidates,
         nextStart: hasPreparedNext ? upcomingPage * pageSize + 1 : totalLeads + 1,
-        nextEnd: hasPreparedNext ? Math.min((upcomingPage + 1) * pageSize, totalLeads) : totalLeads + pageSize,
+        nextEnd: hasPreparedNext
+          ? Math.min((upcomingPage + 1) * pageSize, totalLeads)
+          : Math.min(totalLeads + pageSize, candidates.length),
       },
       { headers: { "Cache-Control": "no-store" } }
     );
