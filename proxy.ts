@@ -3,22 +3,24 @@ import { NextRequest, NextResponse } from "next/server";
 const COOKIE_NAME = "leadgrid_user_id";
 const HEADER_NAME = "x-leadgrid-user-id";
 
-function newWorkspaceId() {
-  const uuid =
-    globalThis.crypto && "randomUUID" in globalThis.crypto
-      ? globalThis.crypto.randomUUID()
-      : `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-
-  return `u_${uuid.replace(/-/g, "")}`;
-}
-
 function safeWorkspaceId(value?: string | null) {
   const cleaned = String(value || "")
     .trim()
     .replace(/[^a-zA-Z0-9_-]/g, "_")
     .slice(0, 80);
 
-  return cleaned || newWorkspaceId();
+  return cleaned || "main";
+}
+
+function getWorkspaceId(request: NextRequest) {
+  // Production must use one shared workspace, otherwise every new browser/curl
+  // cookie creates a different empty data folder/blob prefix.
+  if (process.env.VERCEL) {
+    return safeWorkspaceId(process.env.LEADGRID_WORKSPACE_ID || "main");
+  }
+
+  const existing = request.cookies.get(COOKIE_NAME)?.value;
+  return safeWorkspaceId(existing || "local");
 }
 
 function shouldRedirectToCanonical(request: NextRequest) {
@@ -53,8 +55,7 @@ export function proxy(request: NextRequest) {
     return NextResponse.redirect(canonicalRedirect);
   }
 
-  const existing = request.cookies.get(COOKIE_NAME)?.value;
-  const workspaceId = safeWorkspaceId(existing);
+  const workspaceId = getWorkspaceId(request);
 
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set(HEADER_NAME, workspaceId);
@@ -65,15 +66,13 @@ export function proxy(request: NextRequest) {
     },
   });
 
-  if (!existing || existing !== workspaceId) {
-    response.cookies.set(COOKIE_NAME, workspaceId, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 30,
-    });
-  }
+  response.cookies.set(COOKIE_NAME, workspaceId, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 60 * 60 * 24 * 30,
+  });
 
   return response;
 }
