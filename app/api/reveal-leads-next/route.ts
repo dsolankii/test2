@@ -1,20 +1,22 @@
 import { NextResponse } from "next/server";
 import { readFile, writeFile, mkdir } from "fs/promises";
 import path from "path";
-import { runLocalScript } from "@/lib/run-local-script";
 import { dataPath } from "@/lib/data-dir";
 import { applyWorkspaceToRequest } from "@/lib/workspace";
+import { runLocalScript } from "@/lib/run-local-script";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
+const PAGE_SIZE = 50;
+
 function makePaths() {
   return {
-    statePath: dataPath("leadgrid-visible-state.json"),
-    dashboardPath: dataPath("company-dashboard-leads.json"),
     precleanPath: dataPath("real-source-mentions-preclean.json"),
     aiPath: dataPath("ai-enriched-company-leads.json"),
+    dashboardPath: dataPath("company-dashboard-leads.json"),
+    statePath: dataPath("leadgrid-visible-state.json"),
   };
 }
 
@@ -28,148 +30,98 @@ async function readJsonArray(filePath: string) {
   }
 }
 
-async function readState() {
-  const { statePath } = makePaths();
-
-  try {
-    const raw = await readFile(statePath, "utf8");
-    const state = JSON.parse(raw);
-
-    return {
-      currentPage: Number.isFinite(Number(state.currentPage))
-        ? Number(state.currentPage)
-        : 0,
-      maxUnlockedPage: Number.isFinite(Number(state.maxUnlockedPage))
-        ? Number(state.maxUnlockedPage)
-        : 0,
-      pageSize: Number.isFinite(Number(state.pageSize))
-        ? Number(state.pageSize)
-        : 50,
-    };
-  } catch {
-    return {
-      currentPage: 0,
-      maxUnlockedPage: 0,
-      pageSize: 50,
-    };
-  }
-}
-
-async function writeState(state: { currentPage: number; maxUnlockedPage: number; pageSize: number }) {
-  const { statePath } = makePaths();
-  await mkdir(path.dirname(statePath), { recursive: true });
-  await writeFile(statePath, JSON.stringify(state, null, 2));
+async function writeJson(filePath: string, value: unknown) {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, JSON.stringify(value, null, 2));
 }
 
 export async function POST(request: Request) {
   applyWorkspaceToRequest(request);
 
-  try {
-    if (process.env.VERCEL) {
-      await runLocalScript("scripts/blob-pull.mjs", 60 * 1000);
-    }
+  const { precleanPath, aiPath, dashboardPath, statePath } = makePaths();
 
-    const { dashboardPath, precleanPath, aiPath } = makePaths();
-    const state = await readState();
-    const pageSize = state.pageSize || 50;
+  if (process.env.VERCEL) {
+    await runLocalScript("scripts/blob-pull.mjs", 60 * 1000);
+  }
 
-    const candidates = await readJsonArray(precleanPath);
-    const beforeDashboardRows = await readJsonArray(dashboardPath);
-    const beforeAiRows = await readJsonArray(aiPath);
+  const candidates = await readJsonArray(precleanPath);
+  const beforeDashboardRows = await readJsonArray(dashboardPath);
+  const beforeAiRows = await readJsonArray(aiPath);
 
-    if (candidates.length <= 0) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "No pre-clean candidates found. Run Scan and Pre-clean first.",
-          candidates: 0,
-          reviewed: beforeDashboardRows.length,
-        },
-        { status: 409, headers: { "Cache-Control": "no-store" } }
-      );
-    }
+  const beforeReviewed = beforeDashboardRows.length;
 
-    const beforeReviewed = beforeDashboardRows.length;
+  const review = await runLocalScript(
+    "scripts/review-next-company-batch.mjs",
+    25 * 60 * 1000
+  );
 
-    const review = await runLocalScript("scripts/review-next-company-batch.mjs", 25 * 60 * 1000);
+  const afterDashboardRows = await readJsonArray(dashboardPath);
+  const afterAiRows = await readJsonArray(aiPath);
 
-    // Important: do not blob-pull after building. That can overwrite the new local dashboard.
-    const afterDashboardRows = await readJsonArray(dashboardPath);
-    const afterAiRows = await readJsonArray(aiPath);
-    const afterReviewed = afterDashboardRows.length;
+  const afterReviewed = afterDashboardRows.length;
+  const addedReviewed = afterReviewed - beforeReviewed;
 
-    if (afterReviewed <= beforeReviewed) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error:
-            "LLM review ran, but no new reviewed leads were added. Check AI key/model and qualification logs.",
-          candidates: candidates.length,
-          beforeReviewed,
-          afterReviewed,
-          beforeAiRows: beforeAiRows.length,
-          afterAiRows: afterAiRows.length,
-          logs: [
-            "--- review-next-company-batch.mjs ---",
-            review.stdout,
-            review.stderr,
-          ]
-            .join("\n")
-            .slice(-5000),
-        },
-        { status: 500, headers: { "Cache-Control": "no-store" } }
-      );
-    }
-
-    const targetPage = Math.floor(beforeReviewed / pageSize);
-    const totalPages = Math.max(Math.ceil(afterReviewed / pageSize), 1);
-    const lastPreparedPage = Math.max(totalPages - 1, 0);
-    const safeTargetPage = Math.min(targetPage, lastPreparedPage);
-
-    const nextState = {
-      currentPage: safeTargetPage,
-      maxUnlockedPage: Math.max(state.maxUnlockedPage, safeTargetPage),
-      pageSize,
-    };
-
-    await writeState(nextState);
-
-    if (process.env.VERCEL) {
-      await runLocalScript("scripts/blob-push.mjs", 60 * 1000);
-    }
-
-    const upcomingPage = nextState.maxUnlockedPage + 1;
-    const hasPendingCandidates = candidates.length > afterReviewed;
-
-    return NextResponse.json(
-      {
-        ok: true,
-        candidates: candidates.length,
-        beforeReviewed,
-        afterReviewed,
-        addedReviewed: afterReviewed - beforeReviewed,
-        currentPage: nextState.currentPage,
-        maxUnlockedPage: nextState.maxUnlockedPage,
-        totalPages,
-        canGoPrev: nextState.currentPage > 0,
-        canGoNext: nextState.currentPage < nextState.maxUnlockedPage,
-        canUnlockNext: hasPendingCandidates,
-        visibleStart: safeTargetPage * pageSize + 1,
-        visibleEnd: Math.min((safeTargetPage + 1) * pageSize, afterReviewed),
-        nextStart: hasPendingCandidates ? afterReviewed + 1 : 0,
-        nextEnd: hasPendingCandidates
-          ? Math.min(afterReviewed + pageSize, candidates.length)
-          : 0,
-      },
-      { headers: { "Cache-Control": "no-store" } }
-    );
-  } catch (error) {
+  if (addedReviewed <= 0) {
     return NextResponse.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : "Reveal failed",
+        error:
+          "LLM review ran, but no new dashboard leads were added. Check review/build logs.",
+        candidates: candidates.length,
+        beforeReviewed,
+        afterReviewed,
+        beforeAiRows: beforeAiRows.length,
+        afterAiRows: afterAiRows.length,
+        logs: ["--- review-next-company-batch.mjs ---", review.stdout, review.stderr]
+          .join("\n")
+          .slice(-8000),
       },
       { status: 500, headers: { "Cache-Control": "no-store" } }
     );
   }
+
+  // Strict target page:
+  // 0 reviewed before -> page 0
+  // 50 reviewed before -> page 1
+  // 100 reviewed before -> page 2
+  const currentPage = Math.max(Math.floor(beforeReviewed / PAGE_SIZE), 0);
+  const maxUnlockedPage = Math.max(Math.ceil(afterReviewed / PAGE_SIZE) - 1, 0);
+
+  await writeJson(statePath, {
+    currentPage,
+    maxUnlockedPage,
+    pageSize: PAGE_SIZE,
+  });
+
+  if (process.env.VERCEL) {
+    await runLocalScript("scripts/blob-push.mjs", 60 * 1000);
+  }
+
+  const pendingReview = Math.max(candidates.length - afterReviewed, 0);
+
+  return NextResponse.json(
+    {
+      ok: true,
+      candidates: candidates.length,
+      beforeReviewed,
+      afterReviewed,
+      addedReviewed,
+      beforeAiRows: beforeAiRows.length,
+      afterAiRows: afterAiRows.length,
+      currentPage,
+      maxUnlockedPage,
+      totalPages: Math.max(Math.ceil(afterReviewed / PAGE_SIZE), 1),
+      canGoPrev: currentPage > 0,
+      canGoNext: currentPage < maxUnlockedPage,
+      canUnlockNext: pendingReview > 0,
+      visibleStart: afterReviewed === 0 ? 0 : currentPage * PAGE_SIZE + 1,
+      visibleEnd: Math.min((currentPage + 1) * PAGE_SIZE, afterReviewed),
+      nextStart: pendingReview > 0 ? afterReviewed + 1 : 0,
+      nextEnd:
+        pendingReview > 0
+          ? Math.min(afterReviewed + PAGE_SIZE, candidates.length)
+          : 0,
+    },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }

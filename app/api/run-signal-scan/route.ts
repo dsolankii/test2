@@ -1,19 +1,16 @@
 import { NextResponse } from "next/server";
 import { readFile } from "fs/promises";
-import { runLocalScript, scriptExists } from "@/lib/run-local-script";
 import { dataPath } from "@/lib/data-dir";
 import { applyWorkspaceToRequest } from "@/lib/workspace";
+import { runLocalScript } from "@/lib/run-local-script";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
-function getCompanyName(row: Record<string, any>) {
-  return String(row.companyName || row.company || row.name || "").trim();
-}
-
-async function readRows(fileName: string) {
+async function readJsonArray(filePath: string) {
   try {
-    const raw = await readFile(dataPath(fileName), "utf8");
+    const raw = await readFile(filePath, "utf8");
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
   } catch {
@@ -23,59 +20,31 @@ async function readRows(fileName: string) {
 
 export async function POST(request: Request) {
   applyWorkspaceToRequest(request);
-  try {
-    const scripts = [
-      "scripts/collect-sources.mjs",
-      "scripts/collect-extra-sources.mjs",
-      "scripts/collect-saas-conference-pages.mjs",
-    ];
 
-    const logs: string[] = [];
-
-    for (const script of scripts) {
-      if (!(await scriptExists(script))) {
-        logs.push(`Skipped missing script: ${script}`);
-        continue;
-      }
-
-      logs.push(`Running ${script}`);
-      const result = await runLocalScript(script, 10 * 60 * 1000);
-
-      if (result.stdout) logs.push(result.stdout);
-      if (result.stderr) logs.push(result.stderr);
-    }
-
-    const rows = await readRows("real-source-mentions.json");
-
-    const companies = new Set(
-      rows
-        .map((row) => getCompanyName(row))
-        .filter(Boolean)
-        .map((name) => name.toLowerCase())
-    );
-
-    const sources = new Set(
-      rows
-        .map((row) =>
-          String(row.sourceName || row.source || row.sourceType || "").trim()
-        )
-        .filter(Boolean)
-    );
-
-    return NextResponse.json({
-      ok: true,
-      rawMentions: rows.length,
-      sourcesScanned: sources.size,
-      uniqueCompanies: companies.size,
-      logs,
-    });
-  } catch (error) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: error instanceof Error ? error.message : "Signal scan failed",
-      },
-      { status: 500 }
-    );
+  if (process.env.VERCEL) {
+    await runLocalScript("scripts/blob-pull.mjs", 60 * 1000);
   }
+
+  const scan = await runLocalScript("scripts/run-source-scan.mjs", 25 * 60 * 1000);
+
+  if (process.env.VERCEL) {
+    await runLocalScript("scripts/blob-push.mjs", 60 * 1000);
+  }
+
+  const rawRows = await readJsonArray(dataPath("real-source-mentions.json"));
+  const uniqueCompanies = new Set(
+    rawRows
+      .map((row: any) => String(row.rawName || row.companyName || "").trim().toLowerCase())
+      .filter(Boolean)
+  ).size;
+
+  return NextResponse.json(
+    {
+      ok: true,
+      rawMentions: rawRows.length,
+      uniqueCompanies,
+      logs: scan.stdout.slice(-12000),
+    },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }
