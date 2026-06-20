@@ -7,6 +7,7 @@ import { applyWorkspaceToRequest } from "@/lib/workspace";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 function paths() {
   return {
