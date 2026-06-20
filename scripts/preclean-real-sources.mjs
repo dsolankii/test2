@@ -21,7 +21,17 @@ function cleanText(value = "") {
 }
 
 function getCompanyName(row) {
-  return cleanText(row.rawName || row.companyName || row.company || row.name || row.title || "");
+  return cleanText(
+    row.rawName ||
+      row.companyName ||
+      row.company ||
+      row.name ||
+      row.organization ||
+      row.organisation ||
+      row.employer ||
+      row.title ||
+      ""
+  );
 }
 
 function normalizeName(name = "") {
@@ -96,7 +106,9 @@ const exactNavigationLabels = new Set([
 
 function isObviousEventLabel(name, row) {
   const normalized = normalizeName(name);
-  const sourceText = cleanText(`${row.sourceName || ""} ${row.sourceType || ""} ${row.sourceUrl || ""}`).toLowerCase();
+  const sourceText = cleanText(
+    `${row.sourceName || ""} ${row.sourceType || ""} ${row.sourceUrl || ""}`
+  ).toLowerCase();
 
   if (exactNavigationLabels.has(normalized)) return true;
 
@@ -125,7 +137,9 @@ function hardRejectReason(row, seenExactRows) {
     normalized,
     cleanText(row.sourceName || "").toLowerCase(),
     cleanText(row.sourceUrl || "").toLowerCase(),
-    cleanText(row.description || row.homepageText || row.careersText || "").toLowerCase().slice(0, 400),
+    cleanText(row.description || row.homepageText || row.careersText || "")
+      .toLowerCase()
+      .slice(0, 400),
   ].join("|");
 
   if (seenExactRows.has(exactKey)) return "Exact duplicate source row.";
@@ -135,7 +149,9 @@ function hardRejectReason(row, seenExactRows) {
   }
 
   const url = cleanText(row.sourceUrl || row.website || "").toLowerCase();
-  const description = cleanText(row.description || row.homepageText || row.careersText || "").toLowerCase();
+  const description = cleanText(
+    row.description || row.homepageText || row.careersText || ""
+  ).toLowerCase();
 
   if (!url && !description && name.length < 4) {
     return "Too little evidence to identify entity.";
@@ -158,7 +174,9 @@ for (const row of rows) {
     normalized,
     cleanText(row.sourceName || "").toLowerCase(),
     cleanText(row.sourceUrl || "").toLowerCase(),
-    cleanText(row.description || row.homepageText || row.careersText || "").toLowerCase().slice(0, 400),
+    cleanText(row.description || row.homepageText || row.careersText || "")
+      .toLowerCase()
+      .slice(0, 400),
   ].join("|");
 
   if (reason) {
@@ -172,6 +190,7 @@ for (const row of rows) {
     });
   } else {
     seenExactRows.add(exactKey);
+
     accepted.push({
       ...row,
       rawName: name || row.rawName,
