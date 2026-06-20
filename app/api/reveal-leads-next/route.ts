@@ -36,9 +36,15 @@ async function readState() {
     const state = JSON.parse(raw);
 
     return {
-      currentPage: Number.isFinite(Number(state.currentPage)) ? Number(state.currentPage) : 0,
-      maxUnlockedPage: Number.isFinite(Number(state.maxUnlockedPage)) ? Number(state.maxUnlockedPage) : 0,
-      pageSize: Number.isFinite(Number(state.pageSize)) ? Number(state.pageSize) : 50,
+      currentPage: Number.isFinite(Number(state.currentPage))
+        ? Number(state.currentPage)
+        : 0,
+      maxUnlockedPage: Number.isFinite(Number(state.maxUnlockedPage))
+        ? Number(state.maxUnlockedPage)
+        : 0,
+      pageSize: Number.isFinite(Number(state.pageSize))
+        ? Number(state.pageSize)
+        : 50,
     };
   } catch {
     return {
@@ -68,8 +74,8 @@ export async function POST(request: Request) {
     const pageSize = state.pageSize || 50;
 
     const candidates = await readJsonArray(precleanPath);
-    let dashboardRows = await readJsonArray(dashboardPath);
-    let aiRows = await readJsonArray(aiPath);
+    const beforeDashboardRows = await readJsonArray(dashboardPath);
+    const beforeAiRows = await readJsonArray(aiPath);
 
     if (candidates.length <= 0) {
       return NextResponse.json(
@@ -77,67 +83,56 @@ export async function POST(request: Request) {
           ok: false,
           error: "No pre-clean candidates found. Run Scan and Pre-clean first.",
           candidates: 0,
-          reviewed: dashboardRows.length,
+          reviewed: beforeDashboardRows.length,
         },
         { status: 409, headers: { "Cache-Control": "no-store" } }
       );
     }
 
-    let totalLeads = dashboardRows.length;
-    let totalPages = Math.max(Math.ceil(totalLeads / pageSize), 1);
-    let lastPreparedPage = Math.max(totalPages - 1, 0);
+    const beforeReviewed = beforeDashboardRows.length;
 
-    const currentMaxUnlocked = Math.min(
-      Math.max(state.maxUnlockedPage, 0),
-      lastPreparedPage
-    );
+    const enrich = await runLocalScript("scripts/enrich-company-batch-ai.mjs", 25 * 60 * 1000);
+    const build = await runLocalScript("scripts/build-company-dashboard-dataset.mjs", 10 * 60 * 1000);
 
-    let targetPage = totalLeads === 0 ? 0 : currentMaxUnlocked + 1;
-    let reviewedMore = false;
-    let logs = "";
+    // Important: do not blob-pull after building. That can overwrite the new local dashboard.
+    const afterDashboardRows = await readJsonArray(dashboardPath);
+    const afterAiRows = await readJsonArray(aiPath);
+    const afterReviewed = afterDashboardRows.length;
 
-    const needsNewLlmBatch = totalLeads === 0 || targetPage > lastPreparedPage;
-
-    if (needsNewLlmBatch) {
-      reviewedMore = true;
-
-      const enrich = await runLocalScript("scripts/enrich-company-batch-ai.mjs", 25 * 60 * 1000);
-      logs += "\n\n--- enrich-company-batch-ai.mjs ---\n" + enrich.stdout + "\n" + enrich.stderr;
-
-      const build = await runLocalScript("scripts/build-company-dashboard-dataset.mjs", 10 * 60 * 1000);
-      logs += "\n\n--- build-company-dashboard-dataset.mjs ---\n" + build.stdout + "\n" + build.stderr;
-
-      // Important: do NOT blob-pull here. That can overwrite the newly-built local files.
-      dashboardRows = await readJsonArray(dashboardPath);
-      aiRows = await readJsonArray(aiPath);
-
-      totalLeads = dashboardRows.length;
-      totalPages = Math.max(Math.ceil(totalLeads / pageSize), 1);
-      lastPreparedPage = Math.max(totalPages - 1, 0);
-
-      if (totalLeads <= 0) {
-        return NextResponse.json(
-          {
-            ok: false,
-            error:
-              "LLM ran, but dashboard is still 0. Check AI key/model and qualification logs.",
-            candidates: candidates.length,
-            aiRows: aiRows.length,
-            dashboardRows: totalLeads,
-            logs: logs.slice(-5000),
-          },
-          { status: 500, headers: { "Cache-Control": "no-store" } }
-        );
-      }
-
-      targetPage = Math.min(targetPage, lastPreparedPage);
+    if (afterReviewed <= beforeReviewed) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "LLM review ran, but no new reviewed leads were added. Check AI key/model and qualification logs.",
+          candidates: candidates.length,
+          beforeReviewed,
+          afterReviewed,
+          beforeAiRows: beforeAiRows.length,
+          afterAiRows: afterAiRows.length,
+          logs: [
+            "--- enrich-company-batch-ai.mjs ---",
+            enrich.stdout,
+            enrich.stderr,
+            "--- build-company-dashboard-dataset.mjs ---",
+            build.stdout,
+            build.stderr,
+          ]
+            .join("\n")
+            .slice(-5000),
+        },
+        { status: 500, headers: { "Cache-Control": "no-store" } }
+      );
     }
 
+    const targetPage = Math.floor(beforeReviewed / pageSize);
+    const totalPages = Math.max(Math.ceil(afterReviewed / pageSize), 1);
+    const lastPreparedPage = Math.max(totalPages - 1, 0);
+    const safeTargetPage = Math.min(targetPage, lastPreparedPage);
+
     const nextState = {
-      // Keep user on the current page. Next 50 only unlocks/prepares the next page.
-      // The right arrow then opens and moves the user to the prepared page.
-      currentPage: Math.min(state.currentPage, Math.max(currentMaxUnlocked, targetPage)),
-      maxUnlockedPage: Math.max(currentMaxUnlocked, targetPage),
+      currentPage: safeTargetPage,
+      maxUnlockedPage: Math.max(state.maxUnlockedPage, safeTargetPage),
       pageSize,
     };
 
@@ -148,26 +143,27 @@ export async function POST(request: Request) {
     }
 
     const upcomingPage = nextState.maxUnlockedPage + 1;
-    const hasPreparedNext = upcomingPage <= lastPreparedPage;
-    const hasPendingCandidates = candidates.length > totalLeads;
+    const hasPendingCandidates = candidates.length > afterReviewed;
 
     return NextResponse.json(
       {
         ok: true,
-        reviewedMore,
         candidates: candidates.length,
-        aiRows: aiRows.length,
-        dashboardRows: totalLeads,
+        beforeReviewed,
+        afterReviewed,
+        addedReviewed: afterReviewed - beforeReviewed,
         currentPage: nextState.currentPage,
         maxUnlockedPage: nextState.maxUnlockedPage,
         totalPages,
         canGoPrev: nextState.currentPage > 0,
         canGoNext: nextState.currentPage < nextState.maxUnlockedPage,
-        canUnlockNext: hasPreparedNext || hasPendingCandidates,
-        nextStart: hasPreparedNext ? upcomingPage * pageSize + 1 : totalLeads + 1,
-        nextEnd: hasPreparedNext
-          ? Math.min((upcomingPage + 1) * pageSize, totalLeads)
-          : Math.min(totalLeads + pageSize, candidates.length),
+        canUnlockNext: hasPendingCandidates,
+        visibleStart: safeTargetPage * pageSize + 1,
+        visibleEnd: Math.min((safeTargetPage + 1) * pageSize, afterReviewed),
+        nextStart: hasPendingCandidates ? afterReviewed + 1 : 0,
+        nextEnd: hasPendingCandidates
+          ? Math.min(afterReviewed + pageSize, candidates.length)
+          : 0,
       },
       { headers: { "Cache-Control": "no-store" } }
     );
