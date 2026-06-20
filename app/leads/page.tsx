@@ -9,6 +9,7 @@ type LeadMeta = {
   totalAvailable: number;
   totalPages: number;
   currentPage: number;
+  maxUnlockedPage: number;
   pageSize: number;
   visibleStart: number;
   visibleEnd: number;
@@ -29,6 +30,7 @@ const emptyMeta: LeadMeta = {
   totalAvailable: 0,
   totalPages: 1,
   currentPage: 0,
+  maxUnlockedPage: 0,
   pageSize: 50,
   visibleStart: 0,
   visibleEnd: 0,
