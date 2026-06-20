@@ -64,7 +64,7 @@ async function readPrivateBlob(pathname: string) {
 
 async function readPublicBlob(url: string) {
   const response = await fetch(`${url}?v=${Date.now()}`, {
-    cache: "no-store"
+    cache: "no-store",
   });
 
   if (!response.ok) return null;
@@ -79,7 +79,7 @@ export async function pullBlobData() {
 
   const { blobs } = await list({
     prefix,
-    limit: 1000
+    limit: 1000,
   });
 
   const byPath = new Map(blobs.map((blob) => [blob.pathname, blob]));
@@ -120,7 +120,7 @@ export async function pushBlobData() {
       access: accessMode,
       allowOverwrite: true,
       contentType: contentType(file),
-      cacheControlMaxAge: 0
+      cacheControlMaxAge: 0,
     });
 
     pushed += 1;
