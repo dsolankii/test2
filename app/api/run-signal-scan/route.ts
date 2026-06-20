@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { readFile } from "fs/promises";
 import { dataPath } from "@/lib/data-dir";
-import { applyWorkspaceToRequest } from "@/lib/workspace";
+import {
+  WORKSPACE_COOKIE,
+  createWorkspaceId,
+  setWorkspaceIdForRequest,
+} from "@/lib/workspace";
 import { runLocalScript } from "@/lib/run-local-script";
 
 export const runtime = "nodejs";
@@ -18,13 +22,12 @@ async function readJsonArray(filePath: string) {
   }
 }
 
-export async function POST(request: Request) {
-  applyWorkspaceToRequest(request);
+export async function POST() {
+  // Every Fresh Scan starts a brand-new workspace.
+  const workspaceId = setWorkspaceIdForRequest(createWorkspaceId());
 
-  // Important: no blob-pull here.
-  // A new scan means a fully fresh pipeline run.
+  // Important: no blob-pull before scan. This must be fresh.
   const reset = await runLocalScript("scripts/reset-all-runtime-data.mjs", 60 * 1000);
-
   const scan = await runLocalScript("scripts/run-source-scan.mjs", 25 * 60 * 1000);
 
   if (process.env.VERCEL) {
@@ -38,9 +41,10 @@ export async function POST(request: Request) {
       .filter(Boolean)
   ).size;
 
-  return NextResponse.json(
+  const response = NextResponse.json(
     {
       ok: true,
+      workspaceId,
       rawMentions: rawRows.length,
       uniqueCompanies,
       logs: [
@@ -54,4 +58,14 @@ export async function POST(request: Request) {
     },
     { headers: { "Cache-Control": "no-store" } }
   );
+
+  response.cookies.set(WORKSPACE_COOKIE, workspaceId, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 60 * 60 * 24 * 30,
+  });
+
+  return response;
 }

@@ -2,11 +2,6 @@ import { access } from "fs/promises";
 import { constants } from "fs";
 import { spawn } from "child_process";
 import path from "path";
-import {
-  LEADGRID_BASE_DATA_DIR,
-  getLeadgridWorkspaceId,
-} from "@/lib/data-dir";
-import { pullBlobData, pushBlobData } from "@/lib/blob-store";
 
 export type RunLocalScriptResult = {
   ok: boolean;
@@ -17,6 +12,10 @@ export type RunLocalScriptResult = {
 
 const isVercel = Boolean(process.env.VERCEL);
 
+const runtimeDataDir = isVercel
+  ? "/tmp/leadgrid-data"
+  : process.env.LEADGRID_DATA_DIR || path.join(process.cwd(), "data");
+
 export async function scriptExists(scriptPath: string) {
   try {
     await access(path.join(process.cwd(), scriptPath), constants.F_OK);
@@ -26,41 +25,23 @@ export async function scriptExists(scriptPath: string) {
   }
 }
 
-function assertScriptOk(result: RunLocalScriptResult, scriptPath: string) {
-  if (result.ok) return;
-
-  const details = [
-    `Script failed: ${scriptPath}`,
-    `Exit code: ${result.code ?? "unknown"}`,
-    result.stderr ? `stderr:\n${result.stderr}` : "",
-    result.stdout ? `stdout:\n${result.stdout}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-
-  const error = new Error(details) as Error & RunLocalScriptResult;
-  error.ok = result.ok;
-  error.code = result.code;
-  error.stdout = result.stdout;
-  error.stderr = result.stderr;
-  throw error;
-}
-
-function runNodeScript(
+export function runLocalScript(
   scriptPath: string,
   timeoutMs = 20 * 60 * 1000
 ): Promise<RunLocalScriptResult> {
   return new Promise((resolve) => {
+    const workspaceId =
+      process.env.LEADGRID_USER_ID ||
+      process.env.LEADGRID_WORKSPACE_ID ||
+      "local";
+
     const child = spawn(process.execPath, [scriptPath], {
       cwd: process.cwd(),
       env: {
         ...process.env,
-
-        // IMPORTANT:
-        // Pass only the base data dir to scripts.
-        // scripts/data-dir.mjs will append /users/<LEADGRID_USER_ID>.
-        LEADGRID_DATA_DIR: LEADGRID_BASE_DATA_DIR,
-        LEADGRID_USER_ID: getLeadgridWorkspaceId(),
+        LEADGRID_DATA_DIR: runtimeDataDir,
+        LEADGRID_USER_ID: workspaceId,
+        LEADGRID_WORKSPACE_ID: workspaceId,
       },
     });
 
@@ -112,50 +93,4 @@ function runNodeScript(
       });
     });
   });
-}
-
-export async function runLocalScript(
-  scriptPath: string,
-  timeoutMs = 20 * 60 * 1000
-): Promise<RunLocalScriptResult> {
-  const isBlobScript =
-    scriptPath.includes("blob-pull") ||
-    scriptPath.includes("blob-push") ||
-    scriptPath.includes("blob-sync");
-
-  if (isBlobScript) {
-    if (isVercel) {
-      if (scriptPath.includes("blob-pull")) {
-        await pullBlobData();
-      } else {
-        await pushBlobData();
-      }
-
-      return {
-        ok: true,
-        code: 0,
-        stdout: `${scriptPath} completed through imported Blob SDK`,
-        stderr: "",
-      };
-    }
-
-    const result = await runNodeScript(scriptPath, timeoutMs);
-    assertScriptOk(result, scriptPath);
-    return result;
-  }
-
-  if (!isVercel) {
-    const result = await runNodeScript(scriptPath, timeoutMs);
-    assertScriptOk(result, scriptPath);
-    return result;
-  }
-
-  await pullBlobData();
-
-  const result = await runNodeScript(scriptPath, timeoutMs);
-  assertScriptOk(result, scriptPath);
-
-  await pushBlobData();
-
-  return result;
 }

@@ -18,10 +18,6 @@ function createWorkspaceId() {
 }
 
 function getWorkspaceId(request: NextRequest) {
-  // Optional admin/debug override only. Do not set this in normal production.
-  const forced = safeWorkspaceId(process.env.LEADGRID_FORCE_WORKSPACE_ID);
-  if (forced) return forced;
-
   const existing = safeWorkspaceId(request.cookies.get(COOKIE_NAME)?.value);
   if (existing) return existing;
 
