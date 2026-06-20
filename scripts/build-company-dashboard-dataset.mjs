@@ -171,6 +171,14 @@ async function readJsonArray(filePath) {
 await mkdir(DATA_DIR, { recursive: true });
 
 const aiRows = await readJsonArray(AI_PATH);
+
+if (aiRows.length === 0) {
+  console.error("Dashboard build refused: AI reviewed input rows are 0.");
+  console.error(`Expected AI file at: ${AI_PATH}`);
+  console.error("This prevents overwriting company-dashboard-leads.json with an empty array.");
+  process.exit(1);
+}
+
 const bestByKey = new Map();
 
 for (const row of aiRows) {

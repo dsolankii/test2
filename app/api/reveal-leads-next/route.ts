@@ -91,8 +91,7 @@ export async function POST(request: Request) {
 
     const beforeReviewed = beforeDashboardRows.length;
 
-    const enrich = await runLocalScript("scripts/enrich-company-batch-ai.mjs", 25 * 60 * 1000);
-    const build = await runLocalScript("scripts/build-company-dashboard-dataset.mjs", 10 * 60 * 1000);
+    const review = await runLocalScript("scripts/review-next-company-batch.mjs", 25 * 60 * 1000);
 
     // Important: do not blob-pull after building. That can overwrite the new local dashboard.
     const afterDashboardRows = await readJsonArray(dashboardPath);
@@ -111,12 +110,9 @@ export async function POST(request: Request) {
           beforeAiRows: beforeAiRows.length,
           afterAiRows: afterAiRows.length,
           logs: [
-            "--- enrich-company-batch-ai.mjs ---",
-            enrich.stdout,
-            enrich.stderr,
-            "--- build-company-dashboard-dataset.mjs ---",
-            build.stdout,
-            build.stderr,
+            "--- review-next-company-batch.mjs ---",
+            review.stdout,
+            review.stderr,
           ]
             .join("\n")
             .slice(-5000),
