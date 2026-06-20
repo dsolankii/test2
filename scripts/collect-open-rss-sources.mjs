@@ -21,7 +21,8 @@ function clean(value) {
 
 function getCompanyName(row) {
   return clean(
-    row.companyName ||
+    row.rawName ||
+      row.companyName ||
       row.company ||
       row.name ||
       row.organization ||
@@ -226,11 +227,24 @@ async function main() {
     });
   }
 
-  if (existingRows.length >= 100 && mergedRows.length < existingRows.length) {
+  const lostRows = existingRows.length - mergedRows.length;
+  const lossRatio = existingRows.length > 0 ? lostRows / existingRows.length : 0;
+
+  if (existingRows.length >= 100 && lossRatio > 0.35) {
     console.error("RSS safety stop");
     console.error(`Before: ${existingRows.length}`);
     console.error(`After: ${mergedRows.length}`);
+    console.error(`Lost rows: ${lostRows}`);
+    console.error(`Loss ratio: ${Math.round(lossRatio * 100)}%`);
+    console.error("Stopping because RSS merge would remove more than 35% of existing rows.");
     process.exit(1);
+  }
+
+  if (lostRows > 0) {
+    console.warn("RSS merge deduped existing rows");
+    console.warn(`Before: ${existingRows.length}`);
+    console.warn(`After: ${mergedRows.length}`);
+    console.warn(`Deduped/lost rows: ${lostRows}`);
   }
 
   console.log("");
