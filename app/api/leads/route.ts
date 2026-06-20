@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { readFile, stat } from "fs/promises";
 import { dataPath } from "@/lib/data-dir";
 import { applyWorkspaceToRequest } from "@/lib/workspace";
+import { runLocalScript } from "@/lib/run-local-script";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -76,6 +77,12 @@ function sortByBatchThenScore(rows: Record<string, any>[]) {
 
 export async function GET(request: Request) {
   applyWorkspaceToRequest(request);
+
+  // Vercel serverless /tmp is not shared across requests.
+  // Pull current workspace files before read-only display.
+  if (process.env.VERCEL) {
+    await runLocalScript("scripts/blob-pull.mjs", 60 * 1000);
+  }
 
   const url = new URL(request.url);
   const requestedPage = Number(url.searchParams.get("page") || 0);
