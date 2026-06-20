@@ -73,19 +73,18 @@ export async function POST(request: Request) {
     const state = await readState();
     const totalPages = Math.max(Math.ceil(totalLeads / state.pageSize), 1);
     const lastPreparedPage = Math.max(totalPages - 1, 0);
-
-    const nextPage = state.maxUnlockedPage + 1;
+    const currentMaxUnlocked = Math.min(Math.max(state.maxUnlockedPage, 0), lastPreparedPage);
+    const nextPage = currentMaxUnlocked + 1;
 
     if (nextPage > lastPreparedPage) {
       return NextResponse.json(
         {
           ok: false,
-          error:
-            "Next 50 is not prepared yet. Wait for background LLM review to finish, or run Review from Console.",
+          error: "Next 50 is not prepared yet. Wait for background LLM review to finish.",
           totalLeads,
           totalPages,
-          currentPage: state.currentPage,
-          maxUnlockedPage: state.maxUnlockedPage,
+          currentPage: Math.min(state.currentPage, currentMaxUnlocked),
+          maxUnlockedPage: currentMaxUnlocked,
         },
         {
           status: 409,

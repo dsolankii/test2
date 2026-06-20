@@ -13,7 +13,6 @@ function makePaths() {
   return {
     statePath: dataPath("leadgrid-visible-state.json"),
     dashboardPath: dataPath("company-dashboard-leads.json"),
-    enrichedPath: dataPath("ai-enriched-company-leads.json"),
   };
 }
 
@@ -75,8 +74,8 @@ export async function POST(request: Request) {
   const totalLeads = await readTotalLeads();
   const state = await readState();
   const totalPages = Math.max(Math.ceil(totalLeads / state.pageSize), 1);
-  const maxUnlockedPage = Math.min(Math.max(state.maxUnlockedPage, 0), totalPages - 1);
-
+  const lastPreparedPage = Math.max(totalPages - 1, 0);
+  const maxUnlockedPage = Math.min(Math.max(state.maxUnlockedPage, 0), lastPreparedPage);
   const currentPage = Math.min(Math.max(state.currentPage, 0), maxUnlockedPage);
 
   const nextPage =

@@ -58,7 +58,18 @@ export async function POST(request: Request) {
     logs.push(build.stdout);
 
     if (process.env.VERCEL) {
-      await runLocalScript("scripts/blob-push.mjs", 60 * 1000);
+      const previousSkipStatePush = process.env.LEADGRID_SKIP_VISIBLE_STATE_PUSH;
+      process.env.LEADGRID_SKIP_VISIBLE_STATE_PUSH = "true";
+
+      try {
+        await runLocalScript("scripts/blob-push.mjs", 60 * 1000);
+      } finally {
+        if (previousSkipStatePush === undefined) {
+          delete process.env.LEADGRID_SKIP_VISIBLE_STATE_PUSH;
+        } else {
+          process.env.LEADGRID_SKIP_VISIBLE_STATE_PUSH = previousSkipStatePush;
+        }
+      }
     }
 
     await writeFile(

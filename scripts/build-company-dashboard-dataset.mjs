@@ -302,7 +302,7 @@ for (const [companyKey, aiRow] of bestAiByKey.entries()) {
   const confidence = getConfidence(aiRow);
   const decision = getDecision(aiRow, score);
 
-  if (isBadLead(aiRow, decision, score)) continue;
+  const isBadLeadValue = isBadLead(aiRow, decision, score);
 
   const mentionCount =
     Number(aiRow.mentionCount || aiRow.mentionsCount || aiRow.mentions || 0) ||
@@ -323,6 +323,7 @@ for (const [companyKey, aiRow] of bestAiByKey.entries()) {
     confidence,
     aiConfidence: confidence,
     reviewStatus: "reviewed",
+    isBadLead: isBadLeadValue,
     sourceName: sourceName(aiRow) || sourceName(primaryMention),
     source: sourceName(aiRow) || sourceName(primaryMention),
     sourceUrl: sourceUrl(aiRow) || sourceUrl(primaryMention),

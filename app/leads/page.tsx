@@ -309,13 +309,13 @@ export default function LeadsPage() {
         throw new Error(data.error || "Background preparation failed");
       }
 
-      setPrefetchStatus("Next batch is prepared.");
+      setPrefetchStatus("Next batch is prepared."); await loadData(false);
     } catch {
       setPrefetchStatus("Next batch will prepare when you click Next 50.");
     }
   }
 
-  async function loadData() {
+  async function loadData(allowPrefetch = true) {
     setLoading(true);
 
     try {
@@ -336,7 +336,7 @@ export default function LeadsPage() {
       setLeadMeta(nextMeta);
       setPageMessage("Showing current 50-lead page");
 
-      maybePrefetchNextBatch(nextMeta);
+      if (allowPrefetch) maybePrefetchNextBatch(nextMeta);
     } catch (error) {
       setLeads([]);
       setLeadMeta(emptyMeta);
@@ -432,6 +432,16 @@ export default function LeadsPage() {
 
   return (
     <main className={pageClass}>
+
+      <div
+        className="pointer-events-none fixed inset-0 opacity-[0.18]"
+        style={{
+          backgroundImage:
+            "linear-gradient(rgba(15,23,42,0.28) 1px, transparent 1px), linear-gradient(90deg, rgba(15,23,42,0.28) 1px, transparent 1px)",
+          backgroundSize: "32px 32px",
+        }}
+      />
+
       <nav
         className={
           darkMode
